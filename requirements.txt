@@ -1,0 +1,11 @@
+chromadb
+fastapi
+uvicorn
+fastmcp
+httpx
+pydantic
+pydantic-settings
+regex
+rank-bm25
+schedule
+json-repair
