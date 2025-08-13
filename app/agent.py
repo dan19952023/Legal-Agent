@@ -25,7 +25,7 @@ import resource
 from app.engine import get_db_info, search as db_search, get_active_collection
 from pydantic import BaseModel
 import re
-import httpx
+import openai
 
 logger = logging.getLogger(__name__)
 
@@ -46,54 +46,52 @@ Respond in JSON format: {{ "reason": "...", "task": "...", "expectation": "..." 
 If no more are needed, just return: <done/>.
 """
 
-async def make_plan(user_request: str, max_steps: int = 15) -> list[Step]:
+def make_plan(user_request: str, max_steps: int = 15) -> list[Step]:
     list_of_steps: list[Step] = []
     
-    async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(60.0)) as client:
-        for _ in range(max_steps):
-            context = "\n".join([f"{i+1}. {step.task}: {step.expectation}" for i, step in enumerate(list_of_steps)])
-            prompt = COT_TEMPLATE.format(
-                user_request=user_request,
-                context=context
-            )
+    client = openai.OpenAI(
+        api_key=settings.llm_api_key, 
+        base_url=settings.llm_base_url
+    )
+    
+    for _ in range(max_steps):
+        context = "\n".join([f"{i+1}. {step.task}: {step.expectation}" for i, step in enumerate(list_of_steps)])
+        prompt = COT_TEMPLATE.format(
+            user_request=user_request,
+            context=context
+        )
 
-            response = await client.post(
-                f"{settings.llm_base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {settings.llm_api_key}"},
-                json={
-                    "model": settings.llm_model_id,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": False,
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-            response_text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "")
-            
-            if "<done/>" in response_text.strip().lower():
-                reasoning = None
+        response = client.chat.completions.create(
+            model=settings.llm_model_id,
+            messages=[{"role": "user", "content": prompt}]
+        )
 
-                if 'reason' in response_text.lower():
-                    try:
-                        l, r = response_text.find('{'), response_text.rfind('}')+1
-                        resp_json: dict = json.loads(response_text[l:r])
-                        reasoning = resp_json.get('reason')
+        response_text = response.choices[0].message.content
+        
+        if "<done/>" in response_text.strip().lower():
+            reasoning = None
 
-                    except Exception as err:
-                        logger.error(f"Error parsing JSON: {err}; Response: {response_text}")
+            if 'reason' in response_text.lower():
+                try:
+                    l, r = response_text.find('{'), response_text.rfind('}')+1
+                    resp_json: dict = json.loads(response_text[l:r])
+                    reasoning = resp_json.get('reason')
 
-                if not reasoning:
-                    reasoning = response_text.strip()
+                except Exception as err:
+                    logger.error(f"Error parsing JSON: {err}; Response: {response_text}")
 
-                break
+            if not reasoning:
+                reasoning = response_text.strip()
 
-            try:
-                l, r = response_text.find('{'), response_text.rfind('}')+1
-                step_data: dict = json.loads(response_text[l:r])
-                step = Step(**step_data)
-                list_of_steps.append(step)
-            except Exception as e:
-                logger.error(f"Failed to parse response: {e}")
+            break
+
+        try:
+            l, r = response_text.find('{'), response_text.rfind('}')+1
+            step_data: dict = json.loads(response_text[l:r])
+            step = Step(**step_data)
+            list_of_steps.append(step)
+        except Exception as e:
+            logger.error(f"Failed to parse response: {e}")
 
     return list_of_steps
 
@@ -427,7 +425,7 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
     if use_simple_cot:
         # Single-pass fast CoT planner: derive steps and execute once
         user_request = messages[-1].get("content", "")
-        steps = await make_plan(user_request, max_steps=5)
+        steps = make_plan(user_request, max_steps=5)
         if steps:
             expectations = "\n".join([step.expectation for step in steps])
             plan_steps = [step.task for step in steps]
