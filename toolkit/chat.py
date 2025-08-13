@@ -9,9 +9,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     user_messages = [
-        'hi',
-        'what can you do?',
-        'show me information about Lawful Permanent Resident Admission for Naturalization'
+        # 'hi',
+        # 'what can you do?',
+        # 'show me information about Lawful Permanent Resident Admission for Naturalization'
     ]
 
     user_messages_it = iter(user_messages)
