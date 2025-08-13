@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # Server
     host: str = Field(alias="HOST", default="0.0.0.0")
-    port: int = Field(alias="PORT", default=80)
+    port: int = Field(alias="PORT", default=8080)
 
     persistent_storage_path: str = Field(alias="PERSISTENT_STORAGE_PATH", default="/storage")
 
