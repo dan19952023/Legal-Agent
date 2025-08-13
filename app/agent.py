@@ -29,28 +29,35 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+class Step(BaseModel):
+    reason: str
+    task: str
+    expectation: str
+
 COT_TEMPLATE = """
-You are an analytical assistant. Your task is to break the user request into a list of steps, each step should clearly describe a single action with expectation output. At each step, it should clearly connect to the previous. The user asked:
+You are an analytical assistant. Your task is to break the user request into a list of steps, each step should clearly describe a single action with expectation output. At each step, it should be a solid link with the previous. The user asked:
 "{user_request}"
 
 So far, these are the steps completed:
 {context}
 
-What is the next step we should do?
+What is the next step should we do?
 Respond in JSON format: {{ "reason": "...", "task": "...", "expectation": "..." }}
 If no more are needed, just return: <done/>.
 """
 
-async def make_plan_cot(user_request: str, max_steps: int = 8) -> list[dict]:
-    steps: list[dict] = []
+async def make_plan(user_request: str, max_steps: int = 15) -> list[Step]:
+    list_of_steps: list[Step] = []
+    
     async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(60.0)) as client:
         for _ in range(max_steps):
-            context = "\n".join([
-                f"{i+1}. {step.get('task', '')}: {step.get('expectation', '')}" for i, step in enumerate(steps)
-            ])
-            prompt = COT_TEMPLATE.format(user_request=user_request, context=context)
+            context = "\n".join([f"{i+1}. {step.task}: {step.expectation}" for i, step in enumerate(list_of_steps)])
+            prompt = COT_TEMPLATE.format(
+                user_request=user_request,
+                context=context
+            )
 
-            resp = await client.post(
+            response = await client.post(
                 f"{settings.llm_base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {settings.llm_api_key}"},
                 json={
@@ -59,23 +66,36 @@ async def make_plan_cot(user_request: str, max_steps: int = 8) -> list[dict]:
                     "stream": False,
                 },
             )
-            resp.raise_for_status()
-            data = resp.json()
-            content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "")
-            if content.strip().lower().find("<done/>") != -1:
+            response.raise_for_status()
+            data = response.json()
+            response_text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "")
+            
+            if "<done/>" in response_text.strip().lower():
+                reasoning = None
+
+                if 'reason' in response_text.lower():
+                    try:
+                        l, r = response_text.find('{'), response_text.rfind('}')+1
+                        resp_json: dict = json.loads(response_text[l:r])
+                        reasoning = resp_json.get('reason')
+
+                    except Exception as err:
+                        logger.error(f"Error parsing JSON: {err}; Response: {response_text}")
+
+                if not reasoning:
+                    reasoning = response_text.strip()
+
                 break
+
             try:
-                l, r = content.find("{"), content.rfind("}") + 1
-                parsed = json.loads(content[l:r])
-                steps.append({
-                    "reason": parsed.get("reason", ""),
-                    "task": parsed.get("task", ""),
-                    "expectation": parsed.get("expectation", ""),
-                })
-            except Exception as parse_err:
-                logger.error(f"COT plan parse error: {parse_err}; Raw: {content[:300]}")
-                break
-    return steps
+                l, r = response_text.find('{'), response_text.rfind('}')+1
+                step_data: dict = json.loads(response_text[l:r])
+                step = Step(**step_data)
+                list_of_steps.append(step)
+            except Exception as e:
+                logger.error(f"Failed to parse response: {e}")
+
+    return list_of_steps
 
 
 @lru_cache(maxsize=1)
@@ -407,10 +427,10 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
     if use_simple_cot:
         # Single-pass fast CoT planner: derive steps and execute once
         user_request = messages[-1].get("content", "")
-        steps = await make_plan_cot(user_request, max_steps=5)
+        steps = await make_plan(user_request, max_steps=5)
         if steps:
-            expectations = "\n".join([s.get("expectation", "") for s in steps if s.get("expectation")])
-            plan_steps = [s.get("task", "") for s in steps if s.get("task")]
+            expectations = "\n".join([step.expectation for step in steps])
+            plan_steps = [step.task for step in steps]
 
             yield wrap_chunk(random_uuid(), f"<think>Planning {len(plan_steps)} steps</think>", role='assistant')
 
