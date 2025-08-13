@@ -20,12 +20,22 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app_state = app.state
-    task = asyncio.create_task(maintainance_loop(app_state.db_path))
+    
+    # Check if background jobs should be disabled
+    import os
+    disable_background_jobs = os.getenv("DISABLE_BACKGROUND_JOBS", "0").lower() in ("1", "true", "yes")
+    
+    if not disable_background_jobs:
+        task = asyncio.create_task(maintainance_loop(app_state.db_path))
+    else:
+        task = None
+        logger.info("Background jobs disabled via DISABLE_BACKGROUND_JOBS=1")
 
     try:
         yield
     finally:
-        task.cancel()
+        if task:
+            task.cancel()
 
 router = APIRouter(lifespan=lifespan)
 

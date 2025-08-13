@@ -24,8 +24,58 @@ import asyncio
 import resource
 from app.engine import get_db_info, search as db_search, get_active_collection
 from pydantic import BaseModel
+import re
+import httpx
 
 logger = logging.getLogger(__name__)
+
+COT_TEMPLATE = """
+You are an analytical assistant. Your task is to break the user request into a list of steps, each step should clearly describe a single action with expectation output. At each step, it should clearly connect to the previous. The user asked:
+"{user_request}"
+
+So far, these are the steps completed:
+{context}
+
+What is the next step we should do?
+Respond in JSON format: {{ "reason": "...", "task": "...", "expectation": "..." }}
+If no more are needed, just return: <done/>.
+"""
+
+async def make_plan_cot(user_request: str, max_steps: int = 8) -> list[dict]:
+    steps: list[dict] = []
+    async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(60.0)) as client:
+        for _ in range(max_steps):
+            context = "\n".join([
+                f"{i+1}. {step.get('task', '')}: {step.get('expectation', '')}" for i, step in enumerate(steps)
+            ])
+            prompt = COT_TEMPLATE.format(user_request=user_request, context=context)
+
+            resp = await client.post(
+                f"{settings.llm_base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+                json={
+                    "model": settings.llm_model_id,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "")
+            if content.strip().lower().find("<done/>") != -1:
+                break
+            try:
+                l, r = content.find("{"), content.rfind("}") + 1
+                parsed = json.loads(content[l:r])
+                steps.append({
+                    "reason": parsed.get("reason", ""),
+                    "task": parsed.get("task", ""),
+                    "expectation": parsed.get("expectation", ""),
+                })
+            except Exception as parse_err:
+                logger.error(f"COT plan parse error: {parse_err}; Raw: {content[:300]}")
+                break
+    return steps
 
 
 @lru_cache(maxsize=1)
@@ -52,16 +102,12 @@ class Executor:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "reasoning": {
-                                "type": "string",
-                                "description": "The reasoning for the search query"
-                            },
                             "query": {
                                 "type": "string",
                                 "description": "The query to search for"
                             }
                         },
-                        "required": ["reasoning", "query"]
+                        "required": ["query"]
                     }
                 }
             },
@@ -73,16 +119,12 @@ class Executor:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "reasoning": {
-                                "type": "string",
-                                "description": "The reasoning for the python code"
-                            },
                             "code": {
                                 "type": "string",
                                 "description": "The python code to run"
                             }
                         },
-                        "required": ["reasoning", "code"]
+                        "required": ["code"]
                     }
                 }
             }
@@ -90,10 +132,21 @@ class Executor:
 
     async def search(self, query: str) -> str: # TODO: add keyword search later
         logger.info(f"Searching for {query}")
-        results = await db_search(query)
+        
+        # Extract legal intent for faster search
+        legal_intent = await extract_legal_intent(query)
+        
+        # Use enhanced search with legal context
+        results = await db_search(query, legal_context=legal_intent)
         logger.info(f"Got {len(results)} results")
 
-        return "\n".join([f"- {result.content} (distance: {result.distance})" for result in results])
+        # Format results efficiently
+        formatted_results = []
+        for result in results:
+            citation = f" (Section: {result.metadata.section})" if result.metadata.section else ""
+            formatted_results.append(f"- {result.content}{citation}")
+        
+        return "\n".join(formatted_results)
 
     async def python(self, code: str) -> str:
         variables = []
@@ -157,11 +210,11 @@ class Executor:
         
     async def execute_tool(self, tool_name: str, tool_args: dict[str, str]) -> str:
         if tool_name == "search":
-            logger.info(f'Executing search: {tool_args["query"]} ({tool_args["reasoning"]})')
+            logger.info(f'Executing search: {tool_args["query"]}')
             return await self.search(tool_args["query"])
 
         if tool_name == "python":
-            logger.info(f'Executing python code: {tool_args["code"]} ({tool_args["reasoning"]})')
+            logger.info(f'Executing python code: {tool_args["code"]}')
             return await self.python(tool_args["code"])
 
         raise ValueError(f"Unknown tool: {tool_name}")
@@ -252,23 +305,27 @@ PLANNER_TOOLS = [
         "type": "function",
         "function": {
             "name": "make_plan",
-            "description": "Make a plan for the next step",
+            "description": "Create a plan with reasoning for the next step",
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "reasoning": {
+                        "type": "string",
+                        "description": "Brief reasoning for this plan"
+                    },
                     "expectations": {
                         "type": "string",
-                        "description": "The expectations for the next step"
+                        "description": "The expectations and goals for this step"
                     },
                     "steps": {
                         "type": "array",
-                        "description": "Step by step to meet the expectations",
+                        "description": "Step-by-step actions to meet the expectations",
                         "items": {
                             "type": "string"
                         }
                     }
                 },
-                "required": ["expectations", "steps"]
+                "required": ["reasoning", "expectations", "steps"]
             }
         }
     }
@@ -284,7 +341,16 @@ def get_executor_ability(executor: Executor) -> str:
 from app.lite_keybert import KeyBERT
 
 async def get_system_prompt(chat_history: list[dict[str, str]], executor: Executor) -> str:
-    system_prompt = "Your task is to make plan, review the result of the executor and response to the user accurately."
+    system_prompt = """You are a USCIS legal information assistant. Use Chain of Thought reasoning for planning:
+
+1. **Accurate**: Only provide information found in USCIS Policy Manual
+2. **Current**: Prioritize the most recent policy information  
+3. **Specific**: Include exact citations and section references
+4. **Clear**: Explain complex legal concepts in simple terms
+
+**Use systematic reasoning**: Think step-by-step, plan search strategy, consider challenges.
+
+Your task is to make plan, review the result of the executor and response to the user accurately."""
     executor_ability = get_executor_ability(executor)
     system_prompt += f"\nExecutor ability:\n{executor_ability}"
 
@@ -321,7 +387,8 @@ async def get_system_prompt(chat_history: list[dict[str, str]], executor: Execut
             system_prompt += f"\nReferences:"
 
             for hit in hits:
-                system_prompt += f"\n- {hit.content}"
+                citation = f" (Section: {hit.metadata.section})" if hit.metadata.section else ""
+                system_prompt += f"\n- {hit.content}{citation}"
 
     except Exception as err:
         logger.error(f'Error while extracting flatterned_keywords and searching for relevant information: {err}', exc_info=True)
@@ -334,6 +401,48 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
 
     arm = AgentResourceManager()
     messages = refine_chat_history(messages, system_prompt, arm)
+
+    use_simple_cot = os.getenv("USE_SIMPLE_COT_PLANNER", "0").lower() in ("1", "true", "yes")
+
+    if use_simple_cot:
+        # Single-pass fast CoT planner: derive steps and execute once
+        user_request = messages[-1].get("content", "")
+        steps = await make_plan_cot(user_request, max_steps=5)
+        if steps:
+            expectations = "\n".join([s.get("expectation", "") for s in steps if s.get("expectation")])
+            plan_steps = [s.get("task", "") for s in steps if s.get("task")]
+
+            yield wrap_chunk(random_uuid(), f"<think>Planning {len(plan_steps)} steps</think>", role='assistant')
+
+            output = ''
+            try:
+                yield wrap_chunk(random_uuid(), f'<agent_message avatar="{get_avatar()}" notification="Executor is working">', role='assistant')
+                async for item in executor.execute(expectations, plan_steps, "Be concise"):
+                    if isinstance(item, ChatCompletionStreamResponse) and item.choices[0].delta.content:
+                        output += item.choices[0].delta.content
+                        yield item
+            except Exception as e:
+                logger.error(f"Error while running executor: {str(e)}", exc_info=True)
+                output = f"Error while running executor: {str(e)}"
+            finally:
+                yield wrap_chunk(random_uuid(), "</agent_message>", role='assistant')
+                output = refine_mcp_response(output, arm)
+                output += "\n\n*This is general guidance, not legal advice.*"
+
+            # Return once
+            yield ChatCompletionResponse(
+                id=random_uuid(),
+                choices=[{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": output},
+                    "finish_reason": "stop"
+                }],
+                created=int(asyncio.get_event_loop().time()),
+                model=settings.llm_model_id,
+                object="chat.completion"
+            )
+            return
+        # If no steps, fall through to default planner
 
     while True:
         generator = create_streaming_response(
@@ -367,8 +476,17 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
             tool_args = json.loads(call.function.arguments)
             
             if tool_name == 'make_plan':
+                # Extract Chain of Thought reasoning
+                reasoning = tool_args.get('reasoning', '')
                 expectations += tool_args['expectations'] + '\n'
                 steps.extend(tool_args['steps'])
+                
+                # Log the reasoning for transparency
+                logger.info(f"Planner reasoning: {reasoning}")
+                
+                # Add reasoning to the response for user transparency
+                if reasoning:
+                    yield wrap_chunk(random_uuid(), f"<think>{reasoning}</think>", role='assistant')
 
         call_id = random_uuid()
 
@@ -396,6 +514,10 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
             try:
                 yield wrap_chunk(random_uuid(), f'<agent_message avatar="{get_avatar()}" notification="Executor is working">', role='assistant')
                 logger.info(f"Executing executor with expectations: {expectations} and steps: {steps}")
+                
+                # Show concise execution reasoning
+                execution_reasoning = f"Executing {len(steps)} steps: {', '.join(steps[:2])}{'...' if len(steps) > 2 else ''}"
+                yield wrap_chunk(random_uuid(), f"<think>{execution_reasoning}</think>", role='assistant')
 
                 async for item in executor.execute(expectations, steps, "Should be short and concise"):
                     if isinstance(item, ChatCompletionStreamResponse) and item.choices[0].delta.content:
@@ -409,12 +531,42 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
             finally:
                 yield wrap_chunk(random_uuid(), "</agent_message>", role='assistant')
                 output = refine_mcp_response(output, arm)
+                
+                # Add concise Chain of Thought summary
+                if 'reasoning' in locals():
+                    summary = f"CoT: {len(steps)} steps executed successfully"
+                    yield wrap_chunk(random_uuid(), f"<summary>{summary}</summary>", role='assistant')
+                
+                # Add brief legal disclaimer
+                output += "\n\n*This is general guidance, not legal advice.*"
 
         else:
             output = 'Please specify at least one step for the executor to run.'
+            output += "\n\n*This is general guidance, not legal advice.*"
 
         messages.append({
             "role": "tool",
             "tool_call_id": call_id,
             "content": output
         })
+
+async def extract_legal_intent(query: str) -> dict:
+    """Extract legal intent from user query - optimized for speed"""
+    legal_patterns = {
+        "eligibility": r"(eligible|qualify|requirements|criteria|qualification)",
+        "process": r"(how to|process|steps|procedure|apply|application)",
+        "timeline": r"(how long|time|duration|processing time|wait|schedule)",
+        "documents": r"(documents|forms|evidence|proof|required|submit)",
+        "appeals": r"(appeal|denied|rejected|challenge|reconsideration)",
+        "fees": r"(cost|fee|payment|money|price)",
+        "status": r"(status|check|track|current|pending)",
+        "renewal": r"(renew|extension|continue|maintain)",
+        "change": r"(change|modify|update|correct|amend)"
+    }
+    
+    intent = {}
+    for category, pattern in legal_patterns.items():
+        if re.search(pattern, query, re.IGNORECASE):
+            intent[category] = True
+    
+    return intent

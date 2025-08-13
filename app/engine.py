@@ -47,6 +47,18 @@ class Metadata(BaseModel):
     section: str | None = None
     reference_url: str | None = None
 
+class LegalMetadata(BaseModel):
+    volume: str | None = None
+    chapter: str | None = None
+    section: str | None = None
+    reference_url: str | None = None
+    # Add legal-specific fields
+    legal_topic: str | None = None      # "Naturalization", "Green Card", etc.
+    effective_date: str | None = None   # When law took effect
+    citation: str | None = None         # Legal citation
+    jurisdiction: str = "USCIS"         # Always USCIS
+    document_type: str | None = None    # "Policy Manual", "Form Instructions", etc.
+
 class DataItem(BaseModel):
     id: str
     content: str
@@ -205,7 +217,9 @@ state_manager = State()
 async def search(
     queries: list[str] | str, 
     max_results: int = 10, 
-    semantic_weight: float = 0.8 # TODO: add keyword search later
+    semantic_weight: float = 0.8, # TODO: add keyword search later
+    search_type: str = "semantic",
+    legal_context: dict = None
 ) -> list[SearchResult]:
     if isinstance(queries, str):
         queries = [queries]
@@ -252,6 +266,79 @@ async def search(
         
     return final_results
 
+async def legal_context_search(
+    queries: list[str] | str, 
+    max_results: int = 10,
+    legal_topic: str = None,
+    legal_intent: dict = None
+) -> list[SearchResult]:
+    """Search with legal context awareness"""
+    if isinstance(queries, str):
+        queries = [queries]
+    
+    active_collection = state_manager.get()
+    
+    if not active_collection:
+        logger.warning("No available collection at this time")
+        return []
+    
+    collection = active_collection.collection
+    model_id = active_collection.model_id
+    
+    # Get embeddings for queries
+    embeddings = await embed(queries, model_id)
+    
+    if not embeddings:
+        logger.warning("No embeddings generated; Returning empty results")
+        return []
+    
+    # If we have legal context, try to filter results
+    if legal_topic or legal_intent:
+        # First try to find documents with matching legal metadata
+        metadata_filter = {}
+        if legal_topic:
+            metadata_filter["legal_topic"] = legal_topic
+        
+        # Search with metadata filtering
+        async with engine_maintainance_lock.read():
+            results: QueryResult = collection.query(
+                query_embeddings=embeddings,
+                n_results=max_results * 2,  # Get more results for filtering
+                include=["distances", "metadatas", "documents"],
+                where=metadata_filter if metadata_filter else None
+            )
+    else:
+        # Regular semantic search
+        async with engine_maintainance_lock.read():
+            results: QueryResult = collection.query(
+                query_embeddings=embeddings,
+                n_results=max_results,
+                include=["distances", "metadatas", "documents"]
+            )
+    
+    # Process results similar to main search function
+    ids, docs, metadatas, distances = [], [], [], []
+    
+    for _id, _doc, _metadata, _distance in zip(results["ids"], results["documents"], results["metadatas"], results["distances"]):
+        ids.extend(_id)
+        docs.extend(_doc)
+        metadatas.extend(_metadata)
+        distances.extend(_distance)
+    
+    collected = set([])
+    final_results = []
+    
+    for _id, _doc, _metadata, _distance in zip(ids, docs, metadatas, distances):
+        if _id in collected:
+            continue
+        
+        collected.add(_id)
+        final_results.append(SearchResult(id=_id, content=_doc, metadata=_metadata, distance=_distance))
+    
+    # Sort by relevance and limit results
+    final_results.sort(key=lambda x: x.distance)
+    return final_results[:max_results]
+
 def load_db(db_path: str) -> Database | None:
     if not db_path or not os.path.exists(db_path):
         logger.warning(f"No database path provided or database path does not exist; Returning an empty database")
@@ -273,6 +360,12 @@ def load_db(db_path: str) -> Database | None:
     )
 
 async def maintainance_loop(db_path: str):
+    # Check if background jobs should be disabled
+    import os
+    if os.getenv("DISABLE_BACKGROUND_JOBS", "0").lower() in ("1", "true", "yes"):
+        logger.info("Background jobs disabled via DISABLE_BACKGROUND_JOBS=1; Exiting maintenance loop")
+        return
+        
     if not db_path or not os.path.exists(db_path):
         logger.warning("No database to maintain; Exiting maintainance loop")
         return
@@ -309,7 +402,7 @@ async def maintainance_loop(db_path: str):
             ]
 
             if not ids_not_in_collection:
-                logger.info("All items are already in the collection; Sleeping for 60 seconds")
+                logger.info("All items are already in the collection; Sleeping for 1 second")
                 continue
 
             if not await bulk_insert(db.data, active_collection):
@@ -319,7 +412,7 @@ async def maintainance_loop(db_path: str):
             logger.error(f"Error in maintainance loop: {e}", exc_info=True)
 
         finally:
-            await asyncio.sleep(60)
+            await asyncio.sleep(1)
 
 def get_db_info() -> DatabaseMetadata | None:
     return state_manager.get_db().metadata
