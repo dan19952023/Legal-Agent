@@ -107,7 +107,7 @@ async def make_plan(user_request: str, max_steps: int = 15) -> list[Step]:
             )
             
             # Enhanced legal-focused prompt for better step generation
-            enhanced_prompt = """You are a USCIS legal research specialist. Break down this legal query into focused, actionable research steps:
+            enhanced_prompt = """You are a USCIS legal research specialist with expertise in immigration law. Break down this legal query into focused, actionable research steps:
 
 User Request: "{user_request}"
 
@@ -117,6 +117,7 @@ Generate legal research steps that:
 3. Cover all aspects of the legal question comprehensively
 4. Follow USCIS policy manual structure and legal precedents
 5. Will provide legally accurate and complete guidance
+6. Include specific legal citations, form numbers, or section references when possible
 
 IMPORTANT: Each step should contain specific legal terms, section numbers, or form names that can be searched for in the USCIS Policy Manual database.
 
@@ -166,8 +167,22 @@ If no more steps needed for comprehensive legal coverage, return: <done/>"""
                         if step_data is None:
                             logger.warning(f"Failed to parse step {step_count + 1}, skipping")
                             continue
+                        
                         step = Step(**step_data)
+                        
+                        # Validate legal step quality
+                        if not validate_legal_step(step):
+                            logger.warning(f"Generated step {step_count + 1} failed legal validation: {step.task}")
+                            # Try to regenerate with more specific guidance
+                            continue
+                        
                         list_of_steps.append(step)
+                        
+                        # Check step dependencies
+                        if len(list_of_steps) > 1 and not check_step_dependencies(list_of_steps):
+                            logger.warning(f"Step dependencies check failed for step {step_count + 1}")
+                            # Continue but log the issue
+                        
                     except Exception as e:
                         logger.error(f"Failed to parse response for step {step_count + 1}: {e}")
                         continue
@@ -176,7 +191,28 @@ If no more steps needed for comprehensive legal coverage, return: <done/>"""
                     logger.error(f"API error on step {step_count + 1}: {api_error}")
                     break
 
-            return list_of_steps
+            # Post-process validation
+            if list_of_steps:
+                # Ensure we have at least one valid legal step
+                valid_steps = [step for step in list_of_steps if validate_legal_step(step)]
+                if not valid_steps:
+                    logger.error("No valid legal steps generated")
+                    # Create a fallback step
+                    fallback_step = Step(
+                        reason="Fallback legal research step",
+                        task=f"Research USCIS Policy Manual for {user_request[:100]}",
+                        expectation="Find relevant immigration law information and requirements"
+                    )
+                    return [fallback_step]
+                
+                # Check overall plan quality
+                if not check_step_dependencies(valid_steps):
+                    logger.warning("Step dependencies check failed, but continuing with generated steps")
+                
+                return valid_steps
+            else:
+                logger.error("No steps generated")
+                return []
             
         except Exception as e:
             logger.error(f"Critical error in _make_plan_sync: {e}")
@@ -610,8 +646,14 @@ async def execute_legal_steps_optimized(executor: Executor, steps: list[Step], a
                 output += "\n\n*Legal research complete - comprehensive coverage achieved.*"
                 break
         
-        # Final legal synthesis
+        # Build coherent legal argument from research
+        legal_argument = build_legal_argument(steps, legal_context)
+        
+        # Final legal synthesis with enhanced formatting
         output = await synthesize_legal_response(output, steps, legal_context, arm)
+        
+        # Add legal argument section
+        output += "\n\n" + legal_argument
         
     except Exception as e:
         logger.error(f"Error while running legal executor: {str(e)}", exc_info=True)
@@ -633,36 +675,13 @@ async def execute_legal_step_optimized(executor: Executor, step: Step, legal_con
             recent_findings = list(legal_context.values())[-2:]
             context = " ".join([str(finding) for finding in recent_findings])
         
-        # Enhanced legal search query with context - make it more specific
-        # Extract key terms from the step for targeted search
-        step_keywords = []
-        if step.task:
-            # Extract specific legal terms and requirements
-            task_lower = step.task.lower()
-            if 'continuous residence' in task_lower:
-                step_keywords.extend(['continuous residence', 'residence requirements', 'INA 316'])
-            if 'naturalization' in task_lower:
-                step_keywords.extend(['naturalization', 'citizenship', 'N-400'])
-            if 'permanent resident' in task_lower:
-                step_keywords.extend(['permanent resident', 'green card', 'LPR'])
-            if 'spouse' in task_lower or 'marriage' in task_lower:
-                step_keywords.extend(['spouse', 'marriage', 'INA 319', '3 year rule'])
-            if 'travel' in task_lower or 'absence' in task_lower:
-                step_keywords.extend(['travel', 'absence', 'continuous presence', 'physical presence'])
-            if 'eligibility' in task_lower:
-                step_keywords.extend(['eligibility', 'requirements', 'qualifications'])
-        
-        # Build targeted search query
-        if step_keywords:
-            enhanced_query = " ".join(step_keywords[:5])  # Limit to 5 most relevant terms
-        else:
-            # Fallback to more generic but still targeted search
-            enhanced_query = f"USCIS Policy Manual {step.task}"
+        # Use enhanced legal search query building
+        enhanced_query = build_legal_search_query(step, legal_context)
         
         if context:
             enhanced_query += f" {context[:200]}"  # Add limited context
         
-        logger.info(f"Searching for {enhanced_query}")
+        logger.info(f"Searching for: {enhanced_query}")
         
         # Execute search with legal accuracy focus
         search_result = await asyncio.wait_for(
@@ -674,19 +693,32 @@ async def execute_legal_step_optimized(executor: Executor, step: Step, legal_con
         if search_result:
             content = ""
             
-            # Try to extract content from different possible structures
-            if hasattr(search_result, 'choices') and search_result.choices:
+            # Debug logging to see what we're getting
+            logger.info(f"Search result type: {type(search_result)}")
+            logger.info(f"Search result content: {str(search_result)[:200]}...")
+            
+            # Handle string response from executor.search()
+            if isinstance(search_result, str):
+                content = search_result
+                logger.info(f"Extracted string content length: {len(content)}")
+            # Handle ChatCompletion response structure (fallback)
+            elif hasattr(search_result, 'choices') and search_result.choices:
                 if hasattr(search_result.choices[0], 'delta') and search_result.choices[0].delta:
                     content = search_result.choices[0].delta.content or ""
                 elif hasattr(search_result.choices[0], 'message') and search_result.choices[0].message:
                     content = search_result.choices[0].message.content or ""
                 elif hasattr(search_result.choices[0], 'content'):
                     content = search_result.choices[0].content or ""
+                logger.info(f"Extracted ChatCompletion content length: {len(content)}")
             
-            # If we got content, format it properly
+            # If we got content, format it properly with legal relevance scoring
             if content and len(content.strip()) > 10:
                 # Clean and format the content
                 cleaned_content = content.strip()
+                
+                # Score legal relevance
+                relevance_score = score_legal_relevance(cleaned_content, enhanced_query)
+                
                 # Limit length but ensure we get complete sentences
                 if len(cleaned_content) > 1000:
                     # Try to find a good breaking point
@@ -696,13 +728,16 @@ async def execute_legal_step_optimized(executor: Executor, step: Step, legal_con
                         if len(truncated + sentence + '. ') <= 1000:
                             truncated += sentence + '. '
                         else:
-                            break
+            break
                     if truncated:
                         cleaned_content = truncated + "..."
                     else:
                         cleaned_content = cleaned_content[:1000] + "..."
                 
-                return f"**Legal Research Results:**\n{cleaned_content}"
+                # Add legal relevance indicator
+                relevance_indicator = "High" if relevance_score > 0.7 else "Medium" if relevance_score > 0.4 else "Low"
+                
+                return f"**Legal Research Results (Relevance: {relevance_indicator})**\n{cleaned_content}"
             else:
                 # No meaningful content found, provide a more helpful message
                 return f"**Legal Research Completed:** {step.task}\n\n*Note: Search completed but no specific legal content was found. This may indicate the topic requires more specific search terms or the information is not in the current database.*"
@@ -715,6 +750,45 @@ async def execute_legal_step_optimized(executor: Executor, step: Step, legal_con
         logger.error(f"Error executing legal step {step.task}: {e}")
         return f"**Legal Research Error:** {step.task}\n\n*Note: An error occurred during search execution. Please try rephrasing your question.*"
 
+def score_legal_relevance(content: str, query: str) -> float:
+    """Score the legal relevance of search results."""
+    if not content or not query:
+        return 0.0
+    
+    score = 0.0
+    content_lower = content.lower()
+    query_lower = query.lower()
+    
+    # Extract legal terms from query
+    query_terms = extract_legal_terms(query)
+    
+    # Score based on legal term matches
+    for term in query_terms:
+        if term.lower() in content_lower:
+            score += 0.2  # Each legal term match adds 0.2
+    
+    # Score based on USCIS-specific content
+    uscis_indicators = ['uscis', 'policy manual', 'immigration', 'naturalization', 'citizenship']
+    for indicator in uscis_indicators:
+        if indicator in content_lower:
+            score += 0.1
+    
+    # Score based on legal citation presence
+    citation_patterns = [r'INA\s+\d+', r'Section\s+\d+', r'Chapter\s+\d+', r'[A-Z]-\d+']
+    for pattern in citation_patterns:
+        import re
+        if re.search(pattern, content, re.IGNORECASE):
+            score += 0.15
+    
+    # Score based on content length (prefer substantial content)
+    if len(content) > 500:
+        score += 0.1
+    elif len(content) > 200:
+        score += 0.05
+    
+    # Normalize score to 0.0-1.0 range
+    return min(1.0, score)
+
 async def has_comprehensive_legal_coverage(output: str, completed_steps: list[Step], legal_context: dict) -> bool:
     """Check if we have comprehensive legal coverage for the query."""
     try:
@@ -726,12 +800,28 @@ async def has_comprehensive_legal_coverage(output: str, completed_steps: list[St
         if len(completed_steps) < 3:
             return False
         
+        # Extract legal terms from all steps and output
+        all_legal_terms = set()
+        for step in completed_steps:
+            step_terms = extract_legal_terms(step.task)
+            all_legal_terms.update(step_terms)
+        
+        output_terms = extract_legal_terms(output)
+        all_legal_terms.update(output_terms)
+        
         # Check if we have diverse legal information
         legal_keywords = ['eligibility', 'requirements', 'forms', 'process', 'documentation', 'timeline', 'fees']
         keyword_coverage = sum(1 for keyword in legal_keywords if keyword.lower() in output.lower())
         
-        # Need at least 4 legal aspects covered
-        return keyword_coverage >= 4
+        # Check for legal citations and forms
+        has_citations = any('INA' in term for term in all_legal_terms)
+        has_forms = any('-' in term and term[0].isalpha() for term in all_legal_terms)
+        
+        # Need at least 4 legal aspects covered and some citations/forms
+        basic_coverage = keyword_coverage >= 4
+        citation_coverage = has_citations or has_forms
+        
+        return basic_coverage and citation_coverage
         
     except Exception as e:
         logger.error(f"Error checking legal coverage: {e}")
@@ -747,32 +837,110 @@ async def synthesize_legal_response(output: str, steps: list[Step], legal_contex
         for i, step in enumerate(steps):
             summary += f"{i+1}. {step.task}\n"
         
+        # Add legal insights
+        summary += f"\n**Key Legal Insights:**\n"
+        
+        # Extract key legal points from steps
+        key_insights = []
+        for step in steps:
+            step_lower = step.task.lower()
+            if 'eligibility' in step_lower:
+                key_insights.append("Eligibility requirements identified")
+            if 'process' in step_lower or 'application' in step_lower:
+                key_insights.append("Application process outlined")
+            if 'requirements' in step_lower or 'documentation' in step_lower:
+                key_insights.append("Documentation requirements specified")
+            if 'timeline' in step_lower or 'time' in step_lower:
+                key_insights.append("Processing timeline established")
+            if 'fees' in step_lower or 'cost' in step_lower:
+                key_insights.append("Fee structure documented")
+        
+        if key_insights:
+            for insight in key_insights:
+                summary += f"• {insight}\n"
+        else:
+            summary += "• Legal requirements and procedures identified\n"
+        
+        # Add legal recommendations
+        summary += f"\n**Legal Recommendations:**\n"
+        summary += "• Review all requirements carefully before proceeding\n"
+        summary += "• Consult with an immigration attorney for complex cases\n"
+        summary += "• Keep copies of all documentation and correspondence\n"
+        summary += "• Monitor USCIS processing times and policy updates\n"
+        
         summary += f"\n**Legal Guidance**\n{output}"
         
         return summary
-        
-    except Exception as e:
+
+            except Exception as e:
         logger.error(f"Error synthesizing legal response: {e}")
         return output
 
 async def extract_legal_intent(query: str) -> dict:
-    """Extract legal intent from user query - optimized for speed"""
+    """Extract legal intent from user query - optimized for speed and accuracy"""
     legal_patterns = {
-        "eligibility": r"(eligible|qualify|requirements|criteria|qualification)",
-        "process": r"(how to|process|steps|procedure|apply|application)",
-        "timeline": r"(how long|time|duration|processing time|wait|schedule)",
-        "documents": r"(documents|forms|evidence|proof|required|submit)",
-        "appeals": r"(appeal|denied|rejected|challenge|reconsideration)",
-        "fees": r"(cost|fee|payment|money|price)",
-        "status": r"(status|check|track|current|pending)",
-        "renewal": r"(renew|extension|continue|maintain)",
-        "change": r"(change|modify|update|correct|amend)"
+        "eligibility": r"(eligible|qualify|requirements|criteria|qualification|must have|need to have)",
+        "process": r"(how to|process|steps|procedure|apply|application|submit|file)",
+        "timeline": r"(how long|time|duration|processing time|wait|schedule|when|deadline)",
+        "documents": r"(documents|forms|evidence|proof|required|submit|provide|show)",
+        "appeals": r"(appeal|denied|rejected|challenge|reconsideration|motion|review)",
+        "fees": r"(cost|fee|payment|money|price|how much|total cost|expenses)",
+        "status": r"(status|check|track|current|pending|approved|denied|processing)",
+        "renewal": r"(renew|extension|continue|maintain|extend|continue|reapply)",
+        "change": r"(change|modify|update|correct|amend|adjust|revise|edit)",
+        "travel": r"(travel|leave|absence|return|reentry|permit|advance parole)",
+        "family": r"(spouse|husband|wife|marriage|family|children|parents|siblings)",
+        "employment": r"(work|job|employment|employer|sponsor|labor|occupation)",
+        "criminal": r"(criminal|arrest|conviction|record|background|good moral character)",
+        "education": r"(education|school|university|degree|student|academic|study)"
     }
     
     intent = {}
+    query_lower = query.lower()
+    
+    # Check for legal topic areas
+    legal_topics = {
+        "naturalization": r"(naturalization|citizenship|become citizen|apply for citizenship)",
+        "green_card": r"(green card|permanent resident|lpr|permanent residence)",
+        "visa": r"(visa|temporary|nonimmigrant|immigrant visa)",
+        "asylum": r"(asylum|refugee|protection|persecution)",
+        "deportation": r"(deportation|removal|deport|leave|exit)"
+    }
+    
+    # Extract basic intent patterns
     for category, pattern in legal_patterns.items():
-        if re.search(pattern, query, re.IGNORECASE):
+        if re.search(pattern, query_lower, re.IGNORECASE):
             intent[category] = True
+    
+    # Extract legal topics
+    for topic, pattern in legal_topics.items():
+        if re.search(pattern, query_lower, re.IGNORECASE):
+            intent["legal_topic"] = topic
+            break
+    
+    # Extract urgency level
+    urgency_patterns = {
+        "urgent": r"(urgent|asap|immediately|right away|emergency|critical)",
+        "timeline_sensitive": r"(deadline|due date|expiring|expires|soon|quickly)",
+        "planning": r"(planning|future|later|eventually|someday|considering)"
+    }
+    
+    for urgency, pattern in urgency_patterns.items():
+        if re.search(pattern, query_lower, re.IGNORECASE):
+            intent["urgency"] = urgency
+            break
+    
+    # Extract complexity indicators
+    complexity_indicators = {
+        "simple": r"(simple|basic|general|overview|summary)",
+        "complex": r"(complex|complicated|detailed|specific|technical|legal)",
+        "case_specific": r"(my case|my situation|specific|particular|unique)"
+    }
+    
+    for complexity, pattern in complexity_indicators.items():
+        if re.search(pattern, query_lower, re.IGNORECASE):
+            intent["complexity"] = complexity
+            break
     
     return intent
 async def quick_retrieval_answer(query: str, arm: AgentResourceManager, time_budget: int = 3) -> str:
@@ -806,4 +974,158 @@ I'm here to help with USCIS legal questions. This is a basic response.
 I'm here to help with USCIS legal questions. Please try rephrasing your question.
 
 *For detailed legal research, please enable the enhanced response system.*"""
+
+def validate_legal_step(step: Step) -> bool:
+    """Validate that a generated step is legally relevant and actionable."""
+    if not step.task or not step.task.strip():
+        return False
+    
+    # Check for legal relevance
+    legal_keywords = [
+        'uscis', 'policy', 'ina', 'naturalization', 'lpr', 'visa', 'citizenship',
+        'green card', 'permanent resident', 'immigration', 'law', 'regulation',
+        'form', 'application', 'eligibility', 'requirements', 'process'
+    ]
+    
+    task_lower = step.task.lower()
+    has_legal_keywords = any(keyword in task_lower for keyword in legal_keywords)
+    
+    # Check for actionable content
+    action_verbs = ['search', 'find', 'research', 'identify', 'analyze', 'examine', 'review']
+    has_action = any(verb in task_lower for verb in action_verbs)
+    
+    # Check for specific legal terms
+    has_specific_terms = any(term in task_lower for term in ['section', 'chapter', 'volume', 'form', 'ina'])
+    
+    return has_legal_keywords and has_action and (has_specific_terms or len(step.task) > 20)
+
+def extract_legal_terms(text: str) -> list[str]:
+    """Extract specific legal terms, citations, and form numbers from text."""
+    import re
+    
+    legal_terms = []
+    
+    # Extract INA citations (e.g., INA 316, INA 319)
+    ina_citations = re.findall(r'INA\s+\d+[A-Z]?', text, re.IGNORECASE)
+    legal_terms.extend(ina_citations)
+    
+    # Extract form numbers (e.g., N-400, I-485, I-751)
+    form_numbers = re.findall(r'[A-Z]-\d+', text, re.IGNORECASE)
+    legal_terms.extend(form_numbers)
+    
+    # Extract section numbers (e.g., Section 316, Chapter 3)
+    section_refs = re.findall(r'(?:Section|Chapter|Volume)\s+\d+[A-Z]?', text, re.IGNORECASE)
+    legal_terms.extend(section_refs)
+    
+    # Extract specific legal concepts
+    legal_concepts = [
+        'continuous residence', 'physical presence', 'good moral character',
+        'naturalization', 'citizenship', 'permanent resident', 'green card',
+        'spouse', 'marriage', 'travel', 'absence', 'eligibility', 'requirements'
+    ]
+    
+    for concept in legal_concepts:
+        if concept in text.lower():
+            legal_terms.append(concept)
+    
+    return list(set(legal_terms))  # Remove duplicates
+
+def build_legal_search_query(step: Step, context: dict) -> str:
+    """Build optimized legal search queries with specific legal terms."""
+    legal_terms = extract_legal_terms(step.task)
+    
+    # Prioritize legal terms
+    if legal_terms:
+        # Use most relevant legal terms first
+        primary_terms = legal_terms[:3]
+        query = " ".join(primary_terms)
+        
+        # Add USCIS context
+        query += " USCIS Policy Manual"
+        
+        # Add relevant context from previous steps
+        if context:
+            recent_context = list(context.values())[-1] if context else ""
+            if recent_context and len(recent_context) > 50:
+                # Extract key terms from recent context
+                context_terms = extract_legal_terms(str(recent_context))
+                if context_terms:
+                    query += " " + " ".join(context_terms[:2])
+    else:
+        # Fallback to enhanced generic search
+        query = f"USCIS Policy Manual {step.task}"
+    
+    return query
+
+def build_legal_argument(steps: list[Step], results: dict) -> str:
+    """Build a coherent legal argument from research steps and results."""
+    if not steps or not results:
+        return "Insufficient information to build legal argument."
+    
+    argument = "**Legal Analysis Summary**\n\n"
+    
+    # Build logical progression
+    for i, step in enumerate(steps, 1):
+        step_key = f"step_{i}"
+        if step_key in results:
+            result = results[step_key]
+            argument += f"**Step {i}: {step.task}**\n"
+            argument += f"*Finding: {result[:300]}{'...' if len(result) > 300 else ''}*\n\n"
+    
+    # Add legal reasoning
+    argument += "**Legal Reasoning:**\n"
+    argument += "Based on the above research, the legal requirements and processes are as follows:\n\n"
+    
+    # Extract key legal points
+    key_points = []
+    for step in steps:
+        if 'eligibility' in step.task.lower():
+            key_points.append("Eligibility requirements")
+        if 'process' in step.task.lower() or 'application' in step.task.lower():
+            key_points.append("Application process")
+        if 'requirements' in step.task.lower():
+            key_points.append("Documentation requirements")
+        if 'timeline' in step.task.lower() or 'time' in step.task.lower():
+            key_points.append("Processing timeline")
+    
+    if key_points:
+        for point in key_points:
+            argument += f"• {point}\n"
+    else:
+        argument += "• Legal requirements and procedures\n"
+    
+    return argument
+
+def check_step_dependencies(steps: list[Step]) -> bool:
+    """Check if steps build logically upon each other."""
+    if len(steps) < 2:
+        return True
+    
+    for i in range(1, len(steps)):
+        current_step = steps[i]
+        previous_step = steps[i-1]
+        
+        # Check if current step references previous step's output
+        current_lower = current_step.task.lower()
+        previous_lower = previous_step.task.lower()
+        
+        # Look for logical connections
+        has_connection = False
+        
+        # Check for topic continuity
+        if any(term in current_lower for term in ['then', 'next', 'following', 'based on', 'after']):
+            has_connection = True
+        
+        # Check for related legal concepts
+        current_terms = extract_legal_terms(current_step.task)
+        previous_terms = extract_legal_terms(previous_step.task)
+        
+        if set(current_terms) & set(previous_terms):  # Intersection
+            has_connection = True
+        
+        if not has_connection:
+            logger.warning(f"Step {i+1} may not logically follow from step {i}")
+            return False
+    
+    return True
 

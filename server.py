@@ -4,6 +4,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 import uvicorn
 from app.configs import settings
 from app.apis import router as api_router
+from app.engine import state_manager
 import logging
 from argparse import ArgumentParser
 import time
@@ -88,6 +89,17 @@ def main():
     args = parser.parse_args()
 
     server_app.state.db_path = args.db_path
+    
+    # Load database immediately at startup
+    if args.db_path:
+        logger.info(f"Loading database from: {args.db_path}")
+        if state_manager.load_database_sync(args.db_path):
+            logger.info("Database loaded successfully at startup")
+        else:
+            logger.error("Failed to load database at startup")
+            logger.error("Server will start but database functionality may not work")
+    else:
+        logger.warning("No database path provided - server will start without database")
     
     logger.info(f"Starting Legal Agent server on {settings.host}:{settings.port}")
     uvicorn.run(server_app, host=settings.host, port=settings.port)

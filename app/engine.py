@@ -211,6 +211,25 @@ class State:
 
     def get(self) -> ActiveCollection | None:
         return self.current_active_collection
+    
+    def load_database_sync(self, db_path: str) -> bool:
+        """Load database synchronously at startup"""
+        try:
+            if not db_path or not os.path.exists(db_path):
+                logger.warning(f"Database path does not exist: {db_path}")
+                return False
+                
+            db = load_db(db_path)
+            if db:
+                self.current_db = db
+                logger.info(f"Database loaded synchronously: {db.metadata.name} with {len(db.data)} items")
+                return True
+            else:
+                logger.error("Failed to load database")
+                return False
+        except Exception as e:
+            logger.error(f"Error loading database synchronously: {e}")
+            return False
 
 state_manager = State()
 
@@ -228,6 +247,11 @@ async def search(
     
     if not active_collection:
         logger.warning("No available collection at this time")
+        return []
+    
+    # Check if database is loaded
+    if not state_manager.get_db():
+        logger.warning("Database not loaded yet - search() called before database initialization")
         return []
     
     collection = active_collection.collection
@@ -430,7 +454,11 @@ async def maintenance_loop(db_path: str):
             await asyncio.sleep(retry_delay)
 
 def get_db_info() -> DatabaseMetadata | None:
-    return state_manager.get_db().metadata
+    db = state_manager.get_db()
+    if db is None:
+        logger.warning("Database not loaded yet - get_db_info() called before database initialization")
+        return None
+    return db.metadata
 
 def get_active_collection() -> ActiveCollection | None:
     return state_manager.get()
