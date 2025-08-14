@@ -743,24 +743,24 @@ async def execute_legal_analysis(legal_content: str, step_task: str, search_quer
     """Execute legal analysis using LLM to provide comprehensive legal guidance."""
     try:
         # Create a focused prompt for legal analysis
-        analysis_prompt = f"""You are a legal expert specializing in USCIS immigration law. 
+        analysis_prompt = f"""You are a senior USCIS legal expert with deep knowledge of immigration law.
 
-Analyze the following legal content and provide comprehensive, actionable legal guidance:
+Analyze the following legal content and provide SPECIFIC, ACTIONABLE legal guidance:
 
 **Research Task:** {step_task}
 **Search Query:** {search_query}
 
 **Legal Content to Analyze:**
-{legal_content[:4000]}  # Limit content length for LLM processing
+{legal_content[:4000]}
 
-**Your Task:**
-1. Extract key legal requirements and procedures
-2. Identify specific eligibility criteria
-3. Provide actionable steps and documentation needs
-4. Cite relevant legal sections and forms
-5. Give practical advice and timelines
+**Your Task - Provide SPECIFIC Information:**
+1. **Exact legal requirements** - Cite specific INA sections, forms, and regulations
+2. **Specific eligibility criteria** - Exact timeframes, conditions, and qualifications
+3. **Required documents** - List specific forms, evidence, and documentation
+4. **Timeline and fees** - Exact processing times and costs
+5. **Actionable steps** - What the person needs to do, step by step
 
-Provide a structured, comprehensive legal analysis that a person can actually use to take action.
+**IMPORTANT:** Be specific and detailed. Don't give generic answers like "requirements identified" - give the actual requirements, forms, and steps.
 
 **Legal Analysis:**"""
 
@@ -769,7 +769,7 @@ Provide a structured, comprehensive legal analysis that a person can actually us
         
         response = await asyncio.to_thread(
             client.chat.completions.create,
-            model=settings.llm_model,
+            model=settings.llm_model_id,
             messages=[
                 {"role": "system", "content": "You are a USCIS legal expert providing comprehensive, actionable legal guidance."},
                 {"role": "user", "content": analysis_prompt}
@@ -873,7 +873,7 @@ async def synthesize_comprehensive_legal_guidance(research_output: str, complete
         # Create a comprehensive synthesis prompt
         synthesis_prompt = f"""You are a senior USCIS legal expert. 
 
-Synthesize all the legal research into comprehensive, actionable guidance for the user.
+Synthesize all the legal research into SPECIFIC, ACTIONABLE guidance for the user.
 
 **Research Steps Completed:**
 {chr(10).join([f"{i+1}. {step.task}" for i, step in enumerate(completed_steps)])}
@@ -881,25 +881,29 @@ Synthesize all the legal research into comprehensive, actionable guidance for th
 **Legal Research Output:**
 {research_output[:3000]}
 
-**Your Task:**
-Create a comprehensive legal analysis that:
-1. **Directly answers the user's question** with specific legal guidance
-2. **Provides actionable steps** they can take immediately
-3. **Lists required documents and forms** with specific details
-4. **Gives timelines and processing information** 
-5. **Addresses their specific situation** based on the research
-6. **Cites relevant legal authorities** (INA sections, forms, etc.)
-7. **Provides practical advice** for their case
+**Your Task - Provide SPECIFIC, DETAILED Guidance:**
+1. **Directly answer their question** with exact legal requirements and procedures
+2. **Analyze their specific situation** - address their exact circumstances
+3. **List specific documents and forms** - exact form numbers, costs, and requirements
+4. **Provide exact timelines** - how long each step takes
+5. **Give step-by-step actions** - what they need to do, when, and how
+6. **Cite specific legal authorities** - INA sections, USCIS policies, forms
+7. **Address their specific concerns** - travel, marriage duration, etc.
+
+**CRITICAL:** Be specific and detailed. Don't give generic answers. Provide:
+- Exact form numbers and costs
+- Specific timeframes and requirements
+- Step-by-step action items
+- Relevant legal citations
+- Practical advice for their situation
 
 **Format your response as:**
-- **Eligibility Assessment:** [Their specific eligibility]
-- **Required Actions:** [Step-by-step what they need to do]
-- **Documentation Needed:** [Specific forms and evidence]
-- **Timeline:** [How long each step takes]
-- **Legal Basis:** [Relevant laws and regulations]
-- **Practical Tips:** [Real-world advice for their situation]
-
-Make this guidance specific, actionable, and immediately useful for the user's legal situation.
+**Eligibility Assessment:** [Specific analysis of their situation]
+**Required Actions:** [Step-by-step what they need to do]
+**Documentation Needed:** [Specific forms, evidence, and costs]
+**Timeline:** [Exact processing times for each step]
+**Legal Basis:** [Relevant INA sections and USCIS policies]
+**Practical Tips:** [Real-world advice for their specific case]
 
 **Comprehensive Legal Guidance:**"""
 
@@ -908,7 +912,7 @@ Make this guidance specific, actionable, and immediately useful for the user's l
         
         response = await asyncio.to_thread(
             client.chat.completions.create,
-            model=settings.llm_model,
+            model=settings.llm_model_id,
             messages=[
                 {"role": "system", "content": "You are a senior USCIS legal expert providing comprehensive, actionable legal guidance."},
                 {"role": "user", "content": synthesis_prompt}
@@ -1141,16 +1145,16 @@ def build_specific_legal_query(step: Step, context: dict, step_number: int) -> s
     
     # Create step-specific query variations to get diverse results
     step_variations = {
-        1: "requirements eligibility criteria",
-        2: "process procedures steps", 
-        3: "documentation forms evidence",
-        4: "timeline processing time",
-        5: "case law precedents decisions",
-        6: "policy updates recent changes",
-        7: "appeals denials exceptions",
-        8: "fees costs payment",
-        9: "interview test preparation",
-        10: "travel absence reentry"
+        1: "INA 319(a) eligibility requirements spouses US citizens",
+        2: "naturalization process steps N-400 application", 
+        3: "required documents forms evidence naturalization",
+        4: "processing timeline fees naturalization application",
+        5: "continuous residence physical presence requirements",
+        6: "travel absence exceptions naturalization",
+        7: "good moral character requirements naturalization",
+        8: "naturalization interview test preparation",
+        9: "naturalization denial reasons appeals",
+        10: "naturalization case law precedents"
     }
     
     # Use step-specific focus areas
