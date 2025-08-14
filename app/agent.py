@@ -719,20 +719,7 @@ async def execute_legal_step_optimized(executor: Executor, step: Step, legal_con
                 # Score legal relevance
                 relevance_score = score_legal_relevance(cleaned_content, enhanced_query)
                 
-                # Limit length but ensure we get complete sentences
-                if len(cleaned_content) > 1000:
-                    # Try to find a good breaking point
-                    sentences = cleaned_content.split('. ')
-                    truncated = ""
-                    for sentence in sentences:
-                        if len(truncated + sentence + '. ') <= 1000:
-                            truncated += sentence + '. '
-                        else:
-            break
-                    if truncated:
-                        cleaned_content = truncated + "..."
-                    else:
-                        cleaned_content = cleaned_content[:1000] + "..."
+                                # Keep full content for comprehensive legal responses
                 
                 # Add legal relevance indicator
                 relevance_indicator = "High" if relevance_score > 0.7 else "Medium" if relevance_score > 0.4 else "Low"
@@ -793,7 +780,7 @@ async def has_comprehensive_legal_coverage(output: str, completed_steps: list[St
     """Check if we have comprehensive legal coverage for the query."""
     try:
         # Check if we have substantial legal information
-        if len(output) < 1500:  # Need minimum content for legal coverage
+        if len(output) < 500:  # Reduced minimum for legal coverage
             return False
         
         # Check if we have at least 3 steps completed
@@ -871,8 +858,8 @@ async def synthesize_legal_response(output: str, steps: list[Step], legal_contex
         summary += f"\n**Legal Guidance**\n{output}"
         
         return summary
-
-            except Exception as e:
+        
+    except Exception as e:
         logger.error(f"Error synthesizing legal response: {e}")
         return output
 
@@ -957,7 +944,7 @@ async def quick_retrieval_answer(query: str, arm: AgentResourceManager, time_bud
             content = search_result.choices[0].delta.content or ""
             return f"""**Quick Legal Answer**
 
-{content[:1000]}{'...' if len(content) > 1000 else ''}
+{content}
 
 *This is a quick response. For comprehensive analysis, enable enhanced mode.*"""
         else:
