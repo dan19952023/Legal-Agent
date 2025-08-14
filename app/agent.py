@@ -1,5 +1,5 @@
 from typing import AsyncGenerator
-from app.oai_models import ChatCompletionStreamResponse, ChatCompletionResponse
+from app.oai_models import ChatCompletionStreamResponse
 from app.configs import settings
 from app.utils import (
     wrap_chunk, 
@@ -26,6 +26,8 @@ from app.engine import get_db_info, search as db_search, get_active_collection
 from pydantic import BaseModel
 import re
 import openai
+import time
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -46,74 +48,139 @@ Respond in JSON format: {{ "reason": "...", "task": "...", "expectation": "..." 
 If no more are needed, just return: <done/>.
 """
 
+def _parse_step_obj(text: str) -> dict | None:
+    """Parse step object from LLM response text."""
+    try:
+        candidate = text
+        if "```" in text:
+            start = text.find("```")
+            end = text.find("```", start + 3)
+            if end != -1:
+                candidate = text[start + 3:end]
+        l, r = candidate.find('{'), candidate.rfind('}') + 1
+        if l != -1 and r > l:
+            candidate = candidate[l:r]
+        try:
+            data = json.loads(candidate)
+        except Exception:
+            try:
+                from json_repair import repair_json
+                repaired = repair_json(candidate)
+                if isinstance(repaired, tuple) and len(repaired) > 0:
+                    repaired = repaired[0]
+                data = json.loads(repaired)
+            except Exception as e:
+                logger.error(f"Failed to parse response: {e}")
+                return None
+        if isinstance(data, dict) and isinstance(data.get('steps'), list) and len(data['steps']) > 0:
+            data = data['steps'][0]
+        if isinstance(data, dict):
+            if 'task' not in data:
+                data['task'] = "Legal research action based on reasoning"
+            if 'expectation' not in data:
+                data['expectation'] = "Expected legal information to retrieve"
+            if 'reason' not in data:
+                data['reason'] = ""
+            return data
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error parsing step: {e}")
+        return None
+
 async def make_plan(user_request: str, max_steps: int = 15) -> list[Step]:
+    """Generate a plan for legal research using Chain of Thought reasoning."""
+    if not user_request or not user_request.strip():
+        logger.warning("Empty user request provided to make_plan")
+        return []
+    
+    if max_steps < 1 or max_steps > 20:
+        logger.warning(f"Invalid max_steps: {max_steps}, clamping to [1, 20]")
+        max_steps = max(1, min(max_steps, 20))
+    
     list_of_steps: list[Step] = []
     
     def _make_plan_sync(): # Inner synchronous function
-        client = openai.OpenAI(
-            api_key=settings.llm_api_key, 
-            base_url=settings.llm_base_url
-        )
-        
-        # Enhanced legal-focused prompt for better step generation
-        enhanced_prompt = f"""You are a USCIS legal research specialist. Break down this legal query into focused, actionable research steps:
+        try:
+            client = openai.OpenAI(
+                api_key=settings.llm_api_key, 
+                base_url=settings.llm_base_url
+            )
+            
+            # Enhanced legal-focused prompt for better step generation
+            enhanced_prompt = """You are a USCIS legal research specialist. Break down this legal query into focused, actionable research steps:
 
 User Request: "{user_request}"
 
 Generate legal research steps that:
-1. Are specific and actionable (e.g., "Search for eligibility requirements for [specific USCIS category]")
+1. Are specific and actionable with concrete search terms (e.g., "Search for 'continuous residence requirements naturalization INA 316' or '5 year permanent resident naturalization eligibility'")
 2. Build upon each other logically for legal analysis
 3. Cover all aspects of the legal question comprehensively
 4. Follow USCIS policy manual structure and legal precedents
 5. Will provide legally accurate and complete guidance
 
-Current steps: {len(list_of_steps)}/{max_steps}
+IMPORTANT: Each step should contain specific legal terms, section numbers, or form names that can be searched for in the USCIS Policy Manual database.
+
+Current steps: {current_steps}/{max_steps}
 
 Respond in JSON format:
 {{ "reason": "Legal reasoning for this step", "task": "Specific legal research action", "expectation": "Legal information we expect to find" }}
 
 If no more steps needed for comprehensive legal coverage, return: <done/>"""
 
-        for _ in range(max_steps):
-            context = "\n".join([f"{i+1}. {step.task}: {step.expectation}" for i, step in enumerate(list_of_steps)])
-            prompt = enhanced_prompt.format(
-                user_request=user_request,
-                context=context
-            )
+            for step_count in range(max_steps):
+                context = "\n".join([f"{i+1}. {step.task}: {step.expectation}" for i, step in enumerate(list_of_steps)])
+                prompt = enhanced_prompt.format(
+                    user_request=user_request,
+                    current_steps=len(list_of_steps),
+                    max_steps=max_steps
+                )
 
-            response = client.chat.completions.create(
-                model=settings.llm_model_id,
-                messages=[{"role": "user", "content": prompt}]
-            )
+                try:
+                    response = client.chat.completions.create(
+                        model=settings.llm_model_id,
+                        messages=[{"role": "user", "content": prompt}],
+                        timeout=30  # Add timeout for API calls
+                    )
 
-            response_text = response.choices[0].message.content
-            
-            if "<done/>" in response_text.strip().lower():
-                reasoning = None
+                    response_text = response.choices[0].message.content
+                    
+                    if "<done/>" in response_text.strip().lower():
+                        reasoning = None
 
-                if 'reason' in response_text.lower():
+                        if 'reason' in response_text.lower():
+                            try:
+                                l, r = response_text.find('{'), response_text.rfind('}')+1
+                                resp_json: dict = json.loads(response_text[l:r])
+                                reasoning = resp_json.get('reason')
+
+                            except Exception as err:
+                                logger.error(f"Error parsing JSON: {err}; Response: {response_text}")
+
+                        if not reasoning:
+                            reasoning = response_text.strip()
+
+                        break
+
                     try:
-                        l, r = response_text.find('{'), response_text.rfind('}')+1
-                        resp_json: dict = json.loads(response_text[l:r])
-                        reasoning = resp_json.get('reason')
+                        step_data = _parse_step_obj(response_text)
+                        if step_data is None:
+                            logger.warning(f"Failed to parse step {step_count + 1}, skipping")
+                            continue
+                        step = Step(**step_data)
+                        list_of_steps.append(step)
+                    except Exception as e:
+                        logger.error(f"Failed to parse response for step {step_count + 1}: {e}")
+                        continue
+                        
+                except Exception as api_error:
+                    logger.error(f"API error on step {step_count + 1}: {api_error}")
+                    break
 
-                    except Exception as err:
-                        logger.error(f"Error parsing JSON: {err}; Response: {response_text}")
-
-                if not reasoning:
-                    reasoning = response_text.strip()
-
-                break
-
-            try:
-                l, r = response_text.find('{'), response_text.rfind('}')+1
-                step_data: dict = json.loads(response_text[l:r])
-                step = Step(**step_data)
-                list_of_steps.append(step)
-            except Exception as e:
-                logger.error(f"Failed to parse response: {e}")
-
-        return list_of_steps
+            return list_of_steps
+            
+        except Exception as e:
+            logger.error(f"Critical error in _make_plan_sync: {e}")
+            return []
     
     return await asyncio.to_thread(_make_plan_sync)
 
@@ -435,151 +502,102 @@ Your task is to make plan, review the result of the executor and response to the
     
     return system_prompt
 
-async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCompletionStreamResponse | ChatCompletionResponse, None]:
+def env_true(var_name: str, default: bool = False) -> bool:
+    """Check if environment variable is truthy."""
+    value = os.getenv(var_name, "0")
+    return value.lower() in ("1", "true", "yes", "on")
+
+def bounded_env(min_val: int, max_val: int, var_name: str, default: int) -> int:
+    """Get bounded environment variable value."""
+    try:
+        value = int(os.getenv(var_name, str(default)) or str(default))
+        return max(min_val, min(max_val, value))
+    except (ValueError, TypeError):
+        return default
+
+def is_complex(query: str) -> bool:
+    """Determine if a legal query requires complex reasoning."""
+    complexity_indicators = [
+        r'\b(and|or|but|however|although|unless|if|when|while)\b',
+        r'\b(traveled|abroad|outside|returned|left|came back)\b',
+        r'\b(spouse|married|citizen|permanent resident|green card)\b',
+        r'\b(years?|months?|days?|time|period|duration)\b',
+        r'\b(eligible|qualify|requirements|criteria|exceptions?)\b',
+        r'\b(continuous|residence|physical presence|absence)\b',
+        r'\b(naturalization|citizenship|application|process)\b'
+    ]
+    
+    # Count complexity indicators
+    complexity_score = sum(1 for pattern in complexity_indicators 
+                          if re.search(pattern, query, re.IGNORECASE))
+    
+    # Query is complex if it has multiple complexity factors or is long
+    return complexity_score >= 3 or len(query.split()) >= 15
+
+async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCompletionStreamResponse, None]:
+    """Handle user prompt with enhanced legal response system."""
     executor = Executor()
     system_prompt = await get_system_prompt(messages, executor=executor)
 
     arm = AgentResourceManager()
     messages = refine_chat_history(messages, system_prompt, arm)
 
-    use_simple_cot = os.getenv("USE_SIMPLE_COT_PLANNER", "0").lower() in ("1", "true", "yes")
-
-    if use_simple_cot:
-        # Optimized legal-focused CoT planner with enhanced accuracy
-        user_request = messages[-1].get("content", "")
-        # Allow overriding max steps via env var (default 5; bounds 1..15)
-        try:
-            max_steps_env = int(os.getenv("SIMPLE_COT_MAX_STEPS", "5") or "5")
-        except Exception:
-            max_steps_env = 5
-        max_steps = max(1, min(15, max_steps_env))
-
-        steps = await make_plan(user_request, max_steps=max_steps)
+    use_cot = env_true("USE_SIMPLE_COT_PLANNER")
+    user_request = messages[-1].get("content", "")
+    
+    logger.info(f"USE_SIMPLE_COT_PLANNER: {use_cot}, Query complexity: {is_complex(user_request)}")
+    
+    try:
+        if use_cot and is_complex(user_request):
+            logger.info("Using ENHANCED CoT mode for complex query")
+            max_steps = bounded_env(1, 10, "SIMPLE_COT_MAX_STEPS", 5)
+            steps = await make_plan(user_request, max_steps=max_steps)
+            
+            if steps:
+                logger.info(f"Generated {len(steps)} research steps")
+                answer = await execute_legal_steps_optimized(executor, steps, arm, time_budget=8)
+                yield wrap_chunk(random_uuid(), answer, role='assistant')
+                return
         
-        if steps:
-            yield wrap_chunk(random_uuid(), f"<think>Planning {len(steps)} legal research steps</think>", role='assistant')
-            
-            # Execute steps with legal accuracy optimizations
-            output = await execute_legal_steps_optimized(executor, steps, arm)
-            
-            # Return final content as streaming chunks
-            yield wrap_chunk(random_uuid(), output, role='assistant')
-            yield wrap_chunk(random_uuid(), "[DONE]", role='assistant')
-            return
+        # Either not complex, flag off, or no steps → fallback
+        logger.info("Using QUICK retrieval mode")
+        answer = await quick_retrieval_answer(user_request, arm, time_budget=3)
+        yield wrap_chunk(random_uuid(), answer, role='assistant')
+        return
+        
+    except Exception as e:
+        logger.error(f"Error in enhanced mode, falling back: {e}")
+        # Last-resort fallback
+        try:
+            answer = await quick_retrieval_answer(user_request, arm, time_budget=3)
+            yield wrap_chunk(random_uuid(), answer, role='assistant')
+        except Exception as fallback_error:
+            logger.error(f"Fallback also failed: {fallback_error}")
+            basic_response = f"""**Legal Information Request: {user_request}**
 
-    while True:
-        generator = create_streaming_response(
-            base_url=settings.llm_base_url,
-            headers={
-                "Authorization": f"Bearer {settings.llm_api_key}"
-            },
-            model=settings.llm_model_id,
-            messages=messages,
-            tools=PLANNER_TOOLS
-        )
+I'm here to help with USCIS legal questions. Please try rephrasing your question or contact support if the issue persists.
 
-        response_builder = ChatCompletionResponseBuilder()
+**What to do next:**
+- Rephrase your question more simply
+- Check your internet connection
+- Contact system administrator if the problem continues"""
+            yield wrap_chunk(random_uuid(), basic_response, role='assistant')
+        return
 
-        async for chunk in generator:
-            response_builder.add_chunk(chunk)
-
-            if chunk.choices[0].delta.content:
-                yield chunk
-
-        completion = await response_builder.build()
-
-        if not (completion.choices[0].message.tool_calls or []):
-            break
-
-        expectations = ''
-        steps = []
-
-        for call in (completion.choices[0].message.tool_calls or []):
-            tool_name = call.function.name
-            tool_args = json.loads(call.function.arguments)
-            
-            if tool_name == 'make_plan':
-                # Extract Chain of Thought reasoning
-                reasoning = tool_args.get('reasoning', '')
-                expectations += tool_args['expectations'] + '\n'
-                steps.extend(tool_args['steps'])
-                
-                # Log the reasoning for transparency
-                logger.info(f"Planner reasoning: {reasoning}")
-                
-                # Add reasoning to the response for user transparency
-                if reasoning:
-                    yield wrap_chunk(random_uuid(), f"<think>{reasoning}</think>", role='assistant')
-
-        call_id = random_uuid()
-
-        messages.append({
-            'role': 'assistant',
-            'content': '',
-            'tool_calls': [
-                {
-                    'id': call_id,
-                    'type': 'function',
-                    'function': {
-                        'name': 'make_plan',
-                        'arguments': json.dumps({
-                            'expectations': expectations,
-                            'steps': steps
-                        })
-                    }
-                }
-            ]
-        })
-
-        if len(steps) > 0:
-            output = ''
-
-            try:
-                yield wrap_chunk(random_uuid(), f'<agent_message avatar="{get_avatar()}" notification="Executor is working">', role='assistant')
-                logger.info(f"Executing executor with expectations: {expectations} and steps: {steps}")
-                
-                # Show concise execution reasoning
-                execution_reasoning = f"Executing {len(steps)} steps: {', '.join(steps[:2])}{'...' if len(steps) > 2 else ''}"
-                yield wrap_chunk(random_uuid(), f"<think>{execution_reasoning}</think>", role='assistant')
-
-                async for item in executor.execute(expectations, steps, "Should be short and concise"):
-                    if isinstance(item, ChatCompletionStreamResponse) and item.choices[0].delta.content:
-                        output += item.choices[0].delta.content
-                        yield item
-
-            except Exception as e:
-                logger.error(f"Error while running executor: {str(e)}", exc_info=True)
-                output = f"Error while running executor: {str(e)}"
-                
-            finally:
-                yield wrap_chunk(random_uuid(), "</agent_message>", role='assistant')
-                output = refine_mcp_response(output, arm)
-                
-                # Add concise Chain of Thought summary
-                if 'reasoning' in locals():
-                    summary = f"CoT: {len(steps)} steps executed successfully"
-                    yield wrap_chunk(random_uuid(), f"<summary>{summary}</summary>", role='assistant')
-                
-                # Add brief legal disclaimer
-                output += "\n\n*This is general guidance, not legal advice.*"
-
-        else:
-            output = 'Please specify at least one step for the executor to run.'
-            output += "\n\n*This is general guidance, not legal advice.*"
-
-        messages.append({
-            "role": "tool",
-            "tool_call_id": call_id,
-            "content": output
-        })
-
-async def execute_legal_steps_optimized(executor: Executor, steps: list[Step], arm: AgentResourceManager) -> str:
+async def execute_legal_steps_optimized(executor: Executor, steps: list[Step], arm: AgentResourceManager, time_budget: int = 8) -> str:
     """Execute legal research steps with accuracy-focused optimizations."""
     output = ''
     legal_context = {}
     
+    start_time = time.time()
+    
     try:
         for i, step in enumerate(steps):
+            # Check time budget
+            if time.time() - start_time > time_budget:
+                logger.warning(f"Time budget exceeded ({time_budget}s), stopping execution")
+                break
+
             # Execute step with legal context from previous findings
             step_result = await execute_legal_step_optimized(executor, step, legal_context, arm)
             legal_context[f"step_{i+1}"] = step_result
@@ -615,29 +633,87 @@ async def execute_legal_step_optimized(executor: Executor, step: Step, legal_con
             recent_findings = list(legal_context.values())[-2:]
             context = " ".join([str(finding) for finding in recent_findings])
         
-        # Enhanced legal search query with context
-        enhanced_query = f"{step.task} {step.expectation}"
+        # Enhanced legal search query with context - make it more specific
+        # Extract key terms from the step for targeted search
+        step_keywords = []
+        if step.task:
+            # Extract specific legal terms and requirements
+            task_lower = step.task.lower()
+            if 'continuous residence' in task_lower:
+                step_keywords.extend(['continuous residence', 'residence requirements', 'INA 316'])
+            if 'naturalization' in task_lower:
+                step_keywords.extend(['naturalization', 'citizenship', 'N-400'])
+            if 'permanent resident' in task_lower:
+                step_keywords.extend(['permanent resident', 'green card', 'LPR'])
+            if 'spouse' in task_lower or 'marriage' in task_lower:
+                step_keywords.extend(['spouse', 'marriage', 'INA 319', '3 year rule'])
+            if 'travel' in task_lower or 'absence' in task_lower:
+                step_keywords.extend(['travel', 'absence', 'continuous presence', 'physical presence'])
+            if 'eligibility' in task_lower:
+                step_keywords.extend(['eligibility', 'requirements', 'qualifications'])
+        
+        # Build targeted search query
+        if step_keywords:
+            enhanced_query = " ".join(step_keywords[:5])  # Limit to 5 most relevant terms
+        else:
+            # Fallback to more generic but still targeted search
+            enhanced_query = f"USCIS Policy Manual {step.task}"
+        
         if context:
-            enhanced_query += f" Legal context: {context[:300]}..."  # Limit context for precision
+            enhanced_query += f" {context[:200]}"  # Add limited context
+        
+        logger.info(f"Searching for {enhanced_query}")
         
         # Execute search with legal accuracy focus
         search_result = await asyncio.wait_for(
-            executor.search(enhanced_query, max_results=5),  # More results for legal accuracy
+            executor.search(enhanced_query),  # Use default search behavior
             timeout=15.0  # Longer timeout for comprehensive legal research
         )
         
-        # Format result for legal accuracy
-        if search_result and hasattr(search_result, 'choices'):
-            content = search_result.choices[0].delta.content if search_result.choices[0].delta.content else ""
-            return f"Legal findings: {content[:800]}..."  # Longer results for legal accuracy
+        # Format result for legal accuracy - handle different response structures
+        if search_result:
+            content = ""
+            
+            # Try to extract content from different possible structures
+            if hasattr(search_result, 'choices') and search_result.choices:
+                if hasattr(search_result.choices[0], 'delta') and search_result.choices[0].delta:
+                    content = search_result.choices[0].delta.content or ""
+                elif hasattr(search_result.choices[0], 'message') and search_result.choices[0].message:
+                    content = search_result.choices[0].message.content or ""
+                elif hasattr(search_result.choices[0], 'content'):
+                    content = search_result.choices[0].content or ""
+            
+            # If we got content, format it properly
+            if content and len(content.strip()) > 10:
+                # Clean and format the content
+                cleaned_content = content.strip()
+                # Limit length but ensure we get complete sentences
+                if len(cleaned_content) > 1000:
+                    # Try to find a good breaking point
+                    sentences = cleaned_content.split('. ')
+                    truncated = ""
+                    for sentence in sentences:
+                        if len(truncated + sentence + '. ') <= 1000:
+                            truncated += sentence + '. '
+                        else:
+                            break
+                    if truncated:
+                        cleaned_content = truncated + "..."
+                    else:
+                        cleaned_content = cleaned_content[:1000] + "..."
+                
+                return f"**Legal Research Results:**\n{cleaned_content}"
+            else:
+                # No meaningful content found, provide a more helpful message
+                return f"**Legal Research Completed:** {step.task}\n\n*Note: Search completed but no specific legal content was found. This may indicate the topic requires more specific search terms or the information is not in the current database.*"
         else:
-            return f"Legal research completed: {step.task}"
+            return f"**Legal Research Completed:** {step.task}\n\n*Note: Search completed but no results were returned.*"
             
     except asyncio.TimeoutError:
-        return f"Legal research completed (timeout): {step.task}"
+        return f"**Legal Research Timeout:** {step.task}\n\n*Note: Search timed out after 15 seconds. This may indicate the query is too complex or the system is under heavy load.*"
     except Exception as e:
         logger.error(f"Error executing legal step {step.task}: {e}")
-        return f"Legal research completed with note: {step.task}"
+        return f"**Legal Research Error:** {step.task}\n\n*Note: An error occurred during search execution. Please try rephrasing your question.*"
 
 async def has_comprehensive_legal_coverage(output: str, completed_steps: list[Step], legal_context: dict) -> bool:
     """Check if we have comprehensive legal coverage for the query."""
@@ -699,3 +775,35 @@ async def extract_legal_intent(query: str) -> dict:
             intent[category] = True
     
     return intent
+async def quick_retrieval_answer(query: str, arm: AgentResourceManager, time_budget: int = 3) -> str:
+    """Provide quick legal answer without complex planning."""
+    try:
+        # Simple search for immediate answer
+        executor = Executor()
+        search_result = await asyncio.wait_for(
+            executor.search(query),
+            timeout=time_budget
+        )
+        
+        if search_result and hasattr(search_result, 'choices'):
+            content = search_result.choices[0].delta.content or ""
+            return f"""**Quick Legal Answer**
+
+{content[:1000]}{'...' if len(content) > 1000 else ''}
+
+*This is a quick response. For comprehensive analysis, enable enhanced mode.*"""
+        else:
+            return f"""**Legal Information Request: {query}**
+
+I'm here to help with USCIS legal questions. This is a basic response.
+
+*For detailed legal research, please enable the enhanced response system.*"""
+            
+    except Exception as e:
+        logger.error(f"Quick retrieval failed: {e}")
+        return f"""**Legal Information Request: {query}**
+
+I'm here to help with USCIS legal questions. Please try rephrasing your question.
+
+*For detailed legal research, please enable the enhanced response system.*"""
+

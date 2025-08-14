@@ -11,7 +11,7 @@ from chromadb.api.models.Collection import QueryResult
 import json
 import os
 
-engine_maintainance_lock = AsyncRWLock()
+engine_maintenance_lock = AsyncRWLock()
 logger = logging.getLogger(__name__)
 
 async def list_available_models() -> list[str]:
@@ -179,7 +179,7 @@ async def bulk_insert(data: list[DataItem], collection: ActiveCollection) -> boo
         sub_data = data[offset:offset+batch_size]
         logger.info(f"Upserting {len(sub_data)} items")
 
-        async with engine_maintainance_lock.write():
+        async with engine_maintenance_lock.write():
             active_collection.upsert(
                 embeddings=embeddings,
                 documents=[item.content for item in sub_data],
@@ -239,7 +239,7 @@ async def search(
         logger.warning("No embeddings generated; Returning empty results")
         return []
 
-    async with engine_maintainance_lock.read():
+    async with engine_maintenance_lock.read():
         results: QueryResult = collection.query(
             query_embeddings=embeddings,
             n_results=max_results,
@@ -300,7 +300,7 @@ async def legal_context_search(
             metadata_filter["legal_topic"] = legal_topic
         
         # Search with metadata filtering
-        async with engine_maintainance_lock.read():
+        async with engine_maintenance_lock.read():
             results: QueryResult = collection.query(
                 query_embeddings=embeddings,
                 n_results=max_results * 2,  # Get more results for filtering
@@ -309,7 +309,7 @@ async def legal_context_search(
             )
     else:
         # Regular semantic search
-        async with engine_maintainance_lock.read():
+        async with engine_maintenance_lock.read():
             results: QueryResult = collection.query(
                 query_embeddings=embeddings,
                 n_results=max_results,
@@ -359,7 +359,8 @@ def load_db(db_path: str) -> Database | None:
         metadata=DatabaseMetadata(**data_json.get("metadata", {}))
     )
 
-async def maintainance_loop(db_path: str):
+async def maintenance_loop(db_path: str):
+    """Background maintenance loop for database synchronization."""
     # Check if background jobs should be disabled
     import os
     if os.getenv("DISABLE_BACKGROUND_JOBS", "0").lower() in ("1", "true", "yes"):
@@ -367,7 +368,7 @@ async def maintainance_loop(db_path: str):
         return
         
     if not db_path or not os.path.exists(db_path):
-        logger.warning("No database to maintain; Exiting maintainance loop")
+        logger.warning("No database to maintain; Exiting maintenance loop")
         return
 
     try:
@@ -377,23 +378,29 @@ async def maintainance_loop(db_path: str):
         return
     
     if not db:
-        logger.warning("No database to maintain; Exiting maintainance loop")
+        logger.warning("No database to maintain; Exiting maintenance loop")
         return
     
     logger.info(f"Loaded database {db.metadata.name} with {len(db.data)} items")
     target_ids = [item.id for item in db.data]
+    
+    # Configuration for maintenance loop
+    check_interval = 30  # Check every 30 seconds instead of 1 second
+    max_retries = 3
+    retry_delay = 60  # Wait 1 minute between retries on errors
 
     while True:
         try:
             active_collection = await state_manager.refresh()
 
             if not active_collection:
-                logger.warning("No available collection at this time; Sleeping for 10 seconds")
+                logger.warning("No available collection at this time; Sleeping for 30 seconds")
+                await asyncio.sleep(check_interval)
                 continue
 
             collection = active_collection.collection
 
-            async with engine_maintainance_lock.read():
+            async with engine_maintenance_lock.read():
                 ids_in_collection = collection.get(ids=target_ids)
 
             ids_not_in_collection = [
@@ -402,17 +409,25 @@ async def maintainance_loop(db_path: str):
             ]
 
             if not ids_not_in_collection:
-                logger.info("All items are already in the collection; Sleeping for 1 second")
+                logger.info("All items are already in the collection; Sleeping for 30 seconds")
+                await asyncio.sleep(check_interval)
                 continue
 
-            if not await bulk_insert(db.data, active_collection):
-                logger.error("Failed to insert items into the collection; Sleeping for 10 seconds")
+            # Batch insert missing items
+            missing_items = [item for item in db.data if item.id in ids_not_in_collection]
+            logger.info(f"Inserting {len(missing_items)} missing items into collection")
+            
+            if not await bulk_insert(missing_items, active_collection):
+                logger.error("Failed to insert items into the collection; Will retry later")
+                await asyncio.sleep(retry_delay)
+                continue
+
+            logger.info(f"Successfully synchronized {len(missing_items)} items")
+            await asyncio.sleep(check_interval)
 
         except Exception as e:
-            logger.error(f"Error in maintainance loop: {e}", exc_info=True)
-
-        finally:
-            await asyncio.sleep(1)
+            logger.error(f"Error in maintenance loop: {e}", exc_info=True)
+            await asyncio.sleep(retry_delay)
 
 def get_db_info() -> DatabaseMetadata | None:
     return state_manager.get_db().metadata

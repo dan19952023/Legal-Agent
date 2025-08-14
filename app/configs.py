@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 import os
 import logging
 
@@ -17,6 +17,20 @@ class Settings(BaseSettings):
 
     persistent_storage_path: str = Field(alias="PERSISTENT_STORAGE_PATH", default="/storage")
 
+    @field_validator('llm_api_key')
+    @classmethod
+    def validate_api_key(cls, v):
+        if v == "super-secret":
+            logging.warning("Using default API key. Please set LLM_API_KEY environment variable.")
+        return v
+    
+    @field_validator('port')
+    @classmethod
+    def validate_port(cls, v):
+        if v < 1 or v > 65535:
+            raise ValueError("Port must be between 1 and 65535")
+        return v
+
     class Config:
         env_file = ".env"
         case_sensitive = False
@@ -25,6 +39,11 @@ class Settings(BaseSettings):
 settings = Settings()
 
 logger = logging.getLogger(__name__)
+
+# Validate critical settings
+if settings.llm_api_key == "super-secret":
+    logger.error("LLM_API_KEY not set. Please set this environment variable.")
+    logger.error("Example: export LLM_API_KEY='your-api-key-here'")
 
 logger.info(f"Persistent storage path: {settings.persistent_storage_path}")
 os.makedirs(settings.persistent_storage_path, exist_ok=True)
