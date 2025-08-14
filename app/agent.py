@@ -1075,7 +1075,6 @@ async def quick_retrieval_answer(query: str, arm: AgentResourceManager, time_bud
 I'm here to help with USCIS legal questions. This is a basic response.
 
 *For detailed legal research, please enable the enhanced response system.*"""
-            
     except Exception as e:
         logger.error(f"Quick retrieval failed: {e}")
         return f"""**Legal Information Request: {query}**
