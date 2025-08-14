@@ -632,7 +632,7 @@ async def execute_legal_steps_optimized(executor: Executor, steps: list[Step], a
             # Check time budget
             if time.time() - start_time > time_budget:
                 logger.warning(f"Time budget exceeded ({time_budget}s), stopping execution")
-                break
+            break
 
             # Execute step with legal context from previous findings
             step_result = await execute_legal_step_optimized(executor, step, legal_context, arm)
@@ -675,8 +675,9 @@ async def execute_legal_step_optimized(executor: Executor, step: Step, legal_con
             recent_findings = list(legal_context.values())[-2:]
             context = " ".join([str(finding) for finding in recent_findings])
         
-        # Use enhanced legal search query building
-        enhanced_query = build_legal_search_query(step, legal_context)
+        # Build more specific, diverse search queries to avoid duplicate results
+        step_number = len(legal_context) + 1
+        enhanced_query = build_specific_legal_query(step, legal_context, step_number)
         
         if context:
             enhanced_query += f" {context[:200]}"  # Add limited context
@@ -1133,6 +1134,52 @@ def extract_legal_terms(text: str) -> list[str]:
             legal_terms.append(concept)
     
     return list(set(legal_terms))  # Remove duplicates
+
+def build_specific_legal_query(step: Step, context: dict, step_number: int) -> str:
+    """Build specific, diverse legal search queries to avoid duplicate results."""
+    legal_terms = extract_legal_terms(step.task)
+    
+    # Create step-specific query variations to get diverse results
+    step_variations = {
+        1: "requirements eligibility criteria",
+        2: "process procedures steps", 
+        3: "documentation forms evidence",
+        4: "timeline processing time",
+        5: "case law precedents decisions",
+        6: "policy updates recent changes",
+        7: "appeals denials exceptions",
+        8: "fees costs payment",
+        9: "interview test preparation",
+        10: "travel absence reentry"
+    }
+    
+    # Use step-specific focus areas
+    if step_number <= len(step_variations):
+        focus_area = step_variations[step_number]
+    else:
+        focus_area = "requirements process"
+    
+    # Build diverse query
+    if legal_terms:
+        primary_terms = legal_terms[:2]  # Limit to avoid overly long queries
+        query = f"{' '.join(primary_terms)} {focus_area}"
+    else:
+        # Extract key concepts from task
+        task_lower = step.task.lower()
+        if 'naturalization' in task_lower:
+            query = f"naturalization {focus_area} USCIS Policy Manual"
+        elif 'citizenship' in task_lower:
+            query = f"citizenship {focus_area} USCIS Policy Manual"
+        elif 'form' in task_lower:
+            query = f"USCIS forms {focus_area} Policy Manual"
+        else:
+            query = f"immigration {focus_area} USCIS Policy Manual"
+    
+    # Add step-specific modifiers to ensure diversity
+    step_modifiers = ["specific", "detailed", "comprehensive", "current", "recent", "practical"]
+    modifier = step_modifiers[step_number % len(step_modifiers)]
+    
+    return f"{query} {modifier}"
 
 def build_legal_search_query(step: Step, context: dict) -> str:
     """Build optimized legal search queries with specific legal terms."""
