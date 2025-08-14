@@ -711,7 +711,7 @@ async def execute_legal_step_optimized(executor: Executor, step: Step, legal_con
                     content = search_result.choices[0].content or ""
                 logger.info(f"Extracted ChatCompletion content length: {len(content)}")
             
-            # If we got content, format it properly with legal relevance scoring
+            # If we got content, execute legal analysis using LLM
             if content and len(content.strip()) > 10:
                 # Clean and format the content
                 cleaned_content = content.strip()
@@ -719,12 +719,13 @@ async def execute_legal_step_optimized(executor: Executor, step: Step, legal_con
                 # Score legal relevance
                 relevance_score = score_legal_relevance(cleaned_content, enhanced_query)
                 
-                                # Keep full content for comprehensive legal responses
+                # Execute legal analysis using LLM instead of just returning raw content
+                legal_analysis = await execute_legal_analysis(cleaned_content, step.task, enhanced_query)
                 
                 # Add legal relevance indicator
                 relevance_indicator = "High" if relevance_score > 0.7 else "Medium" if relevance_score > 0.4 else "Low"
                 
-                return f"**Legal Research Results (Relevance: {relevance_indicator})**\n{cleaned_content}"
+                return f"**Legal Research Results (Relevance: {relevance_indicator})**\n{legal_analysis}"
             else:
                 # No meaningful content found, provide a more helpful message
                 return f"**Legal Research Completed:** {step.task}\n\n*Note: Search completed but no specific legal content was found. This may indicate the topic requires more specific search terms or the information is not in the current database.*"
@@ -736,6 +737,57 @@ async def execute_legal_step_optimized(executor: Executor, step: Step, legal_con
     except Exception as e:
         logger.error(f"Error executing legal step {step.task}: {e}")
         return f"**Legal Research Error:** {step.task}\n\n*Note: An error occurred during search execution. Please try rephrasing your question.*"
+
+async def execute_legal_analysis(legal_content: str, step_task: str, search_query: str) -> str:
+    """Execute legal analysis using LLM to provide comprehensive legal guidance."""
+    try:
+        # Create a focused prompt for legal analysis
+        analysis_prompt = f"""You are a legal expert specializing in USCIS immigration law. 
+
+Analyze the following legal content and provide comprehensive, actionable legal guidance:
+
+**Research Task:** {step_task}
+**Search Query:** {search_query}
+
+**Legal Content to Analyze:**
+{legal_content[:4000]}  # Limit content length for LLM processing
+
+**Your Task:**
+1. Extract key legal requirements and procedures
+2. Identify specific eligibility criteria
+3. Provide actionable steps and documentation needs
+4. Cite relevant legal sections and forms
+5. Give practical advice and timelines
+
+Provide a structured, comprehensive legal analysis that a person can actually use to take action.
+
+**Legal Analysis:**"""
+
+        # Use OpenAI to analyze the legal content
+        client = openai.OpenAI(api_key=settings.llm_api_key)
+        
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            model=settings.llm_model,
+            messages=[
+                {"role": "system", "content": "You are a USCIS legal expert providing comprehensive, actionable legal guidance."},
+                {"role": "user", "content": analysis_prompt}
+            ],
+            max_tokens=2000,
+            temperature=0.1  # Low temperature for consistent legal analysis
+        )
+        
+        if response.choices and response.choices[0].message:
+            analysis = response.choices[0].message.content
+            return analysis.strip()
+        else:
+            # Fallback to structured content if LLM fails
+            return f"**Legal Analysis:**\n{legal_content[:2000]}..."
+            
+    except Exception as e:
+        logger.error(f"Error executing legal analysis: {e}")
+        # Fallback to structured content if LLM analysis fails
+        return f"**Legal Content:**\n{legal_content[:2000]}..."
 
 def score_legal_relevance(content: str, query: str) -> float:
     """Score the legal relevance of search results."""
@@ -814,6 +866,68 @@ async def has_comprehensive_legal_coverage(output: str, completed_steps: list[St
         logger.error(f"Error checking legal coverage: {e}")
         return False
 
+async def synthesize_comprehensive_legal_guidance(research_output: str, completed_steps: list[Step], legal_context: dict) -> str:
+    """Use LLM to synthesize comprehensive legal guidance from all research steps."""
+    try:
+        # Create a comprehensive synthesis prompt
+        synthesis_prompt = f"""You are a senior USCIS legal expert. 
+
+Synthesize all the legal research into comprehensive, actionable guidance for the user.
+
+**Research Steps Completed:**
+{chr(10).join([f"{i+1}. {step.task}" for i, step in enumerate(completed_steps)])}
+
+**Legal Research Output:**
+{research_output[:3000]}
+
+**Your Task:**
+Create a comprehensive legal analysis that:
+1. **Directly answers the user's question** with specific legal guidance
+2. **Provides actionable steps** they can take immediately
+3. **Lists required documents and forms** with specific details
+4. **Gives timelines and processing information** 
+5. **Addresses their specific situation** based on the research
+6. **Cites relevant legal authorities** (INA sections, forms, etc.)
+7. **Provides practical advice** for their case
+
+**Format your response as:**
+- **Eligibility Assessment:** [Their specific eligibility]
+- **Required Actions:** [Step-by-step what they need to do]
+- **Documentation Needed:** [Specific forms and evidence]
+- **Timeline:** [How long each step takes]
+- **Legal Basis:** [Relevant laws and regulations]
+- **Practical Tips:** [Real-world advice for their situation]
+
+Make this guidance specific, actionable, and immediately useful for the user's legal situation.
+
+**Comprehensive Legal Guidance:**"""
+
+        # Use OpenAI for comprehensive synthesis
+        client = openai.OpenAI(api_key=settings.llm_api_key)
+        
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            model=settings.llm_model,
+            messages=[
+                {"role": "system", "content": "You are a senior USCIS legal expert providing comprehensive, actionable legal guidance."},
+                {"role": "user", "content": synthesis_prompt}
+            ],
+            max_tokens=3000,
+            temperature=0.1  # Low temperature for consistent legal guidance
+        )
+        
+        if response.choices and response.choices[0].message:
+            guidance = response.choices[0].message.content
+            return guidance.strip()
+        else:
+            # Fallback to structured summary
+            return f"**Legal Guidance Summary:**\n{research_output[:2000]}..."
+            
+    except Exception as e:
+        logger.error(f"Error synthesizing comprehensive guidance: {e}")
+        # Fallback to structured summary if LLM synthesis fails
+        return f"**Legal Guidance Summary:**\n{research_output[:2000]}..."
+
 async def synthesize_legal_response(output: str, steps: list[Step], legal_context: dict, arm: AgentResourceManager) -> str:
     """Synthesize final legal response from all research steps."""
     try:
@@ -855,7 +969,10 @@ async def synthesize_legal_response(output: str, steps: list[Step], legal_contex
         summary += "• Keep copies of all documentation and correspondence\n"
         summary += "• Monitor USCIS processing times and policy updates\n"
         
-        summary += f"\n**Legal Guidance**\n{output}"
+        # Use LLM to synthesize comprehensive legal guidance from all research
+        comprehensive_guidance = await synthesize_comprehensive_legal_guidance(output, steps, legal_context)
+        
+        summary += f"\n**Comprehensive Legal Guidance**\n{comprehensive_guidance}"
         
         return summary
         
@@ -928,7 +1045,7 @@ async def extract_legal_intent(query: str) -> dict:
         if re.search(pattern, query_lower, re.IGNORECASE):
             intent["complexity"] = complexity
             break
-    
+
     return intent
 async def quick_retrieval_answer(query: str, arm: AgentResourceManager, time_budget: int = 3) -> str:
     """Provide quick legal answer without complex planning."""
