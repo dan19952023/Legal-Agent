@@ -278,17 +278,84 @@ async def search(
         metadatas.extend(_metadata)
         distances.extend(_distance)
 
-    collected = set([])
+    # Detect overlap and merge overlapping chunks
     final_results = []
+    merged_chunks = []
     
     for _id, _doc, _metadata, _distance in zip(ids, docs, metadatas, distances):
-        if _id in collected:
+        # Skip generic overview content
+        if _doc.startswith("U.S. citizenship is a unique bond") or _doc.startswith("This volume of the USCIS Policy Manual"):
             continue
+            
+        # Check if this chunk overlaps with any existing merged chunk
+        merged = False
+        for i, existing_chunk in enumerate(merged_chunks):
+            was_merged, merged_content = detect_and_merge_overlap(merged_chunks[i], _doc)
+            if was_merged:
+                # Update the merged chunk content
+                merged_chunks[i] = merged_content
+                merged = True
+                break
         
-        collected.add(_id)
-        final_results.append(SearchResult(id=_id, content=_doc, metadata=_metadata, distance=_distance))
+        if not merged:
+            # Create new merged chunk
+            merged_chunks.append(_doc)
+            final_results.append(SearchResult(id=_id, content=_doc, metadata=_metadata, distance=_distance))
         
+        # Limit results
+        if len(final_results) >= max_results:
+            break
+    
     return final_results
+
+def detect_and_merge_overlap(chunk1: str, chunk2: str, overlap_threshold: int = 100) -> tuple[bool, str]:
+    """
+    Detect if two chunks overlap and merge them if they do.
+    Returns True if chunks were merged, False otherwise.
+    """
+    # Find the longest common substring between chunks
+    def longest_common_substring(s1: str, s2: str) -> tuple[int, int, int]:
+        """Find longest common substring and return (start1, start2, length)"""
+        m, n = len(s1), len(s2)
+        dp = [[0] * (n + 1) for _ in range(m + 1)]
+        max_len = 0
+        end_pos = 0
+        
+        for i in range(1, m + 1):
+            for j in range(1, n + 1):
+                if s1[i-1] == s2[j-1]:
+                    dp[i][j] = dp[i-1][j-1] + 1
+                    if dp[i][j] > max_len:
+                        max_len = dp[i][j]
+                        end_pos = i
+        
+        start_pos = end_pos - max_len
+        return start_pos, start_pos, max_len
+    
+    # Check for overlap
+    start1, start2, overlap_len = longest_common_substring(chunk1, chunk2)
+    
+    # If overlap is significant (more than threshold), merge the chunks
+    if overlap_len >= overlap_threshold:
+        # Determine merge strategy based on overlap position
+        if start1 == 0 and start2 + overlap_len == len(chunk2):
+            # chunk2 extends chunk1 to the right
+            merged_content = chunk1 + chunk2[overlap_len:]
+            return True, merged_content
+        elif start2 == 0 and start1 + overlap_len == len(chunk1):
+            # chunk1 extends chunk2 to the right
+            merged_content = chunk2 + chunk1[overlap_len:]
+            return True, merged_content
+        elif start1 + overlap_len == len(chunk1) and start2 == 0:
+            # chunk2 extends chunk1 to the left
+            merged_content = chunk2 + chunk1[overlap_len:]
+            return True, merged_content
+        elif start2 + overlap_len == len(chunk2) and start1 == 0:
+            # chunk1 extends chunk2 to the left
+            merged_content = chunk1 + chunk2[overlap_len:]
+            return True, merged_content
+    
+    return False, chunk1
 
 async def legal_context_search(
     queries: list[str] | str, 
