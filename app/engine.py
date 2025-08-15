@@ -11,7 +11,7 @@ from chromadb.api.models.Collection import QueryResult
 import json
 import os
 
-engine_maintainance_lock = AsyncRWLock()
+engine_maintenance_lock = AsyncRWLock()
 logger = logging.getLogger(__name__)
 
 async def list_available_models() -> list[str]:
@@ -46,6 +46,18 @@ class Metadata(BaseModel):
     chapter: str | None = None
     section: str | None = None
     reference_url: str | None = None
+
+class LegalMetadata(BaseModel):
+    volume: str | None = None
+    chapter: str | None = None
+    section: str | None = None
+    reference_url: str | None = None
+    # Add legal-specific fields
+    legal_topic: str | None = None      # "Naturalization", "Green Card", etc.
+    effective_date: str | None = None   # When law took effect
+    citation: str | None = None         # Legal citation
+    jurisdiction: str = "USCIS"         # Always USCIS
+    document_type: str | None = None    # "Policy Manual", "Form Instructions", etc.
 
 class DataItem(BaseModel):
     id: str
@@ -167,7 +179,7 @@ async def bulk_insert(data: list[DataItem], collection: ActiveCollection) -> boo
         sub_data = data[offset:offset+batch_size]
         logger.info(f"Upserting {len(sub_data)} items")
 
-        async with engine_maintainance_lock.write():
+        async with engine_maintenance_lock.write():
             active_collection.upsert(
                 embeddings=embeddings,
                 documents=[item.content for item in sub_data],
@@ -199,13 +211,34 @@ class State:
 
     def get(self) -> ActiveCollection | None:
         return self.current_active_collection
+    
+    def load_database_sync(self, db_path: str) -> bool:
+        """Load database synchronously at startup"""
+        try:
+            if not db_path or not os.path.exists(db_path):
+                logger.warning(f"Database path does not exist: {db_path}")
+                return False
+                
+            db = load_db(db_path)
+            if db:
+                self.current_db = db
+                logger.info(f"Database loaded synchronously: {db.metadata.name} with {len(db.data)} items")
+                return True
+            else:
+                logger.error("Failed to load database")
+                return False
+        except Exception as e:
+            logger.error(f"Error loading database synchronously: {e}")
+            return False
 
 state_manager = State()
 
 async def search(
     queries: list[str] | str, 
     max_results: int = 10, 
-    semantic_weight: float = 0.8 # TODO: add keyword search later
+    semantic_weight: float = 0.8, # TODO: add keyword search later
+    search_type: str = "semantic",
+    legal_context: dict = None
 ) -> list[SearchResult]:
     if isinstance(queries, str):
         queries = [queries]
@@ -214,6 +247,11 @@ async def search(
     
     if not active_collection:
         logger.warning("No available collection at this time")
+        return []
+    
+    # Check if database is loaded
+    if not state_manager.get_db():
+        logger.warning("Database not loaded yet - search() called before database initialization")
         return []
     
     collection = active_collection.collection
@@ -225,7 +263,7 @@ async def search(
         logger.warning("No embeddings generated; Returning empty results")
         return []
 
-    async with engine_maintainance_lock.read():
+    async with engine_maintenance_lock.read():
         results: QueryResult = collection.query(
             query_embeddings=embeddings,
             n_results=max_results,
@@ -240,6 +278,144 @@ async def search(
         metadatas.extend(_metadata)
         distances.extend(_distance)
 
+    # Detect overlap and merge overlapping chunks
+    final_results = []
+    merged_chunks = []
+    
+    for _id, _doc, _metadata, _distance in zip(ids, docs, metadatas, distances):
+        # Skip generic overview content
+        if _doc.startswith("U.S. citizenship is a unique bond") or _doc.startswith("This volume of the USCIS Policy Manual"):
+            continue
+            
+        # Check if this chunk overlaps with any existing merged chunk
+        merged = False
+        for i, existing_chunk in enumerate(merged_chunks):
+            was_merged, merged_content = detect_and_merge_overlap(merged_chunks[i], _doc)
+            if was_merged:
+                # Update the merged chunk content
+                merged_chunks[i] = merged_content
+                merged = True
+                break
+        
+        if not merged:
+            # Create new merged chunk
+            merged_chunks.append(_doc)
+            final_results.append(SearchResult(id=_id, content=_doc, metadata=_metadata, distance=_distance))
+        
+        # Limit results
+        if len(final_results) >= max_results:
+            break
+    
+    return final_results
+
+def detect_and_merge_overlap(chunk1: str, chunk2: str, overlap_threshold: int = 100) -> tuple[bool, str]:
+    """
+    Detect if two chunks overlap and merge them if they do.
+    Returns True if chunks were merged, False otherwise.
+    """
+    # Find the longest common substring between chunks
+    def longest_common_substring(s1: str, s2: str) -> tuple[int, int, int]:
+        """Find longest common substring and return (start1, start2, length)"""
+        m, n = len(s1), len(s2)
+        dp = [[0] * (n + 1) for _ in range(m + 1)]
+        max_len = 0
+        end_pos = 0
+        
+        for i in range(1, m + 1):
+            for j in range(1, n + 1):
+                if s1[i-1] == s2[j-1]:
+                    dp[i][j] = dp[i-1][j-1] + 1
+                    if dp[i][j] > max_len:
+                        max_len = dp[i][j]
+                        end_pos = i
+        
+        start_pos = end_pos - max_len
+        return start_pos, start_pos, max_len
+    
+    # Check for overlap
+    start1, start2, overlap_len = longest_common_substring(chunk1, chunk2)
+    
+    # If overlap is significant (more than threshold), merge the chunks
+    if overlap_len >= overlap_threshold:
+        # Determine merge strategy based on overlap position
+        if start1 == 0 and start2 + overlap_len == len(chunk2):
+            # chunk2 extends chunk1 to the right
+            merged_content = chunk1 + chunk2[overlap_len:]
+            return True, merged_content
+        elif start2 == 0 and start1 + overlap_len == len(chunk1):
+            # chunk1 extends chunk2 to the right
+            merged_content = chunk2 + chunk1[overlap_len:]
+            return True, merged_content
+        elif start1 + overlap_len == len(chunk1) and start2 == 0:
+            # chunk2 extends chunk1 to the left
+            merged_content = chunk2 + chunk1[overlap_len:]
+            return True, merged_content
+        elif start2 + overlap_len == len(chunk2) and start1 == 0:
+            # chunk1 extends chunk2 to the left
+            merged_content = chunk1 + chunk2[overlap_len:]
+            return True, merged_content
+    
+    return False, chunk1
+
+async def legal_context_search(
+    queries: list[str] | str, 
+    max_results: int = 10,
+    legal_topic: str = None,
+    legal_intent: dict = None
+) -> list[SearchResult]:
+    """Search with legal context awareness"""
+    if isinstance(queries, str):
+        queries = [queries]
+    
+    active_collection = state_manager.get()
+    
+    if not active_collection:
+        logger.warning("No available collection at this time")
+        return []
+    
+    collection = active_collection.collection
+    model_id = active_collection.model_id
+    
+    # Get embeddings for queries
+    embeddings = await embed(queries, model_id)
+    
+    if not embeddings:
+        logger.warning("No embeddings generated; Returning empty results")
+        return []
+    
+    # If we have legal context, try to filter results
+    if legal_topic or legal_intent:
+        # First try to find documents with matching legal metadata
+        metadata_filter = {}
+        if legal_topic:
+            metadata_filter["legal_topic"] = legal_topic
+        
+        # Search with metadata filtering
+        async with engine_maintenance_lock.read():
+            results: QueryResult = collection.query(
+                query_embeddings=embeddings,
+                n_results=max_results * 2,  # Get more results for filtering
+                include=["distances", "metadatas", "documents"],
+                where=metadata_filter if metadata_filter else None
+            )
+    else:
+        # Regular semantic search
+        async with engine_maintenance_lock.read():
+            results: QueryResult = collection.query(
+                query_embeddings=embeddings,
+                n_results=max_results,
+                include=["distances", "metadatas", "documents"]
+            )
+    
+    # Process results similar to main search function
+    ids, docs, metadatas, distances = [], [], [], []
+    
+    for _id, _doc, _metadata, _distance in zip(results["ids"], results["documents"], results["metadatas"], results["distances"]):
+        ids.extend(_id)
+        docs.extend(_doc)
+        metadatas.extend(_metadata)
+        distances.extend(_distance)
+    
     collected = set([])
     final_results = []
     
@@ -249,8 +425,10 @@ async def search(
         
         collected.add(_id)
         final_results.append(SearchResult(id=_id, content=_doc, metadata=_metadata, distance=_distance))
-        
-    return final_results
+    
+    # Sort by relevance and limit results
+    final_results.sort(key=lambda x: x.distance)
+    return final_results[:max_results]
 
 def load_db(db_path: str) -> Database | None:
     if not db_path or not os.path.exists(db_path):
@@ -272,9 +450,16 @@ def load_db(db_path: str) -> Database | None:
         metadata=DatabaseMetadata(**data_json.get("metadata", {}))
     )
 
-async def maintainance_loop(db_path: str):
+async def maintenance_loop(db_path: str):
+    """Background maintenance loop for database synchronization."""
+    # Check if background jobs should be disabled
+    import os
+    if os.getenv("DISABLE_BACKGROUND_JOBS", "0").lower() in ("1", "true", "yes"):
+        logger.info("Background jobs disabled via DISABLE_BACKGROUND_JOBS=1; Exiting maintenance loop")
+        return
+        
     if not db_path or not os.path.exists(db_path):
-        logger.warning("No database to maintain; Exiting maintainance loop")
+        logger.warning("No database to maintain; Exiting maintenance loop")
         return
 
     try:
@@ -284,23 +469,29 @@ async def maintainance_loop(db_path: str):
         return
     
     if not db:
-        logger.warning("No database to maintain; Exiting maintainance loop")
+        logger.warning("No database to maintain; Exiting maintenance loop")
         return
     
     logger.info(f"Loaded database {db.metadata.name} with {len(db.data)} items")
     target_ids = [item.id for item in db.data]
+    
+    # Configuration for maintenance loop
+    check_interval = 30  # Check every 30 seconds instead of 1 second
+    max_retries = 3
+    retry_delay = 60  # Wait 1 minute between retries on errors
 
     while True:
         try:
             active_collection = await state_manager.refresh()
 
             if not active_collection:
-                logger.warning("No available collection at this time; Sleeping for 10 seconds")
+                logger.warning("No available collection at this time; Sleeping for 30 seconds")
+                await asyncio.sleep(check_interval)
                 continue
 
             collection = active_collection.collection
 
-            async with engine_maintainance_lock.read():
+            async with engine_maintenance_lock.read():
                 ids_in_collection = collection.get(ids=target_ids)
 
             ids_not_in_collection = [
@@ -309,20 +500,32 @@ async def maintainance_loop(db_path: str):
             ]
 
             if not ids_not_in_collection:
-                logger.info("All items are already in the collection; Sleeping for 60 seconds")
+                logger.info("All items are already in the collection; Sleeping for 30 seconds")
+                await asyncio.sleep(check_interval)
                 continue
 
-            if not await bulk_insert(db.data, active_collection):
-                logger.error("Failed to insert items into the collection; Sleeping for 10 seconds")
+            # Batch insert missing items
+            missing_items = [item for item in db.data if item.id in ids_not_in_collection]
+            logger.info(f"Inserting {len(missing_items)} missing items into collection")
+            
+            if not await bulk_insert(missing_items, active_collection):
+                logger.error("Failed to insert items into the collection; Will retry later")
+                await asyncio.sleep(retry_delay)
+                continue
+
+            logger.info(f"Successfully synchronized {len(missing_items)} items")
+            await asyncio.sleep(check_interval)
 
         except Exception as e:
-            logger.error(f"Error in maintainance loop: {e}", exc_info=True)
-
-        finally:
-            await asyncio.sleep(60)
+            logger.error(f"Error in maintenance loop: {e}", exc_info=True)
+            await asyncio.sleep(retry_delay)
 
 def get_db_info() -> DatabaseMetadata | None:
-    return state_manager.get_db().metadata
+    db = state_manager.get_db()
+    if db is None:
+        logger.warning("Database not loaded yet - get_db_info() called before database initialization")
+        return None
+    return db.metadata
 
 def get_active_collection() -> ActiveCollection | None:
     return state_manager.get()

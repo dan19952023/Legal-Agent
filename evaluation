@@ -1,0 +1,167 @@
+Current Legal Agent Capabilities
+🎯 Core Legal Research Functions
+USCIS Policy Manual Search: Comprehensive search through USCIS legal documents with 5,265 items in the database
+Legal Intent Recognition: Automatically identifies legal query types (eligibility, process, timeline, documents, etc.)
+Multi-Step Legal Research: Breaks down complex legal questions into focused, actionable research steps
+Legal Context Building: Each research step builds upon previous findings for comprehensive coverage
+🧠 Enhanced Planning System
+Chain of Thought (CoT) Planning:
+Configurable steps (1-15, default 5) via SIMPLE_COT_MAX_STEPS environment variable
+Legal-focused step generation with reasoning, tasks, and expectations
+Completely hidden from users - no thinking process visible
+Two Execution Modes:
+Enhanced Mode (USE_SIMPLE_COT_PLANNER=1): Uses optimized legal research with hidden CoT
+Fallback Mode: Basic response when enhanced system is disabled
+🔍 Advanced Search Capabilities
+Semantic Search: Vector-based search using embeddings
+Keyword Extraction: KeyBERT-powered keyword detection for better search precision
+Legal Metadata: Section citations and legal document references
+Context-Aware Queries: Search queries informed by previous legal findings
+⚡ Performance Optimizations
+Legal Accuracy Focus:
+Longer timeouts (15s) for comprehensive legal research
+More search results (5) for legal accuracy
+Legal quality checks and coverage validation
+Resource Management:
+Memory and CPU limits for Python code execution
+Background job control via DISABLE_BACKGROUND_JOBS
+Efficient database management
+🛠️ Available Tools
+Search Tool: Legal document search with enhanced context
+Python Tool: Data analysis and calculations with safety limits
+Legal Research Orchestration: Multi-step execution with legal synthesis
+📋 Legal Response Format
+Structured Output: Legal research steps with findings
+Comprehensive Coverage: Minimum 1,500 characters with diverse legal aspects
+Legal Disclaimers: Professional legal guidance notices
+Citation Support: Section references and legal document citations
+🔧 Configuration Options
+USE_SIMPLE_COT_PLANNER=1: Enable enhanced legal response system
+SIMPLE_COT_MAX_STEPS=5: Control planning complexity (1-15)
+DISABLE_BACKGROUND_JOBS=1: Disable background maintenance
+PORT=8080: Server port configuration
+🎭 User Experience Features
+Zero Technical Details: All CoT thinking completely hidden
+Professional Interface: Clean, structured legal responses
+Streaming Responses: Real-time legal information delivery
+Error Handling: Graceful fallbacks and error recovery
+The agent is now a professional-grade USCIS legal research assistant that provides comprehensive, accurate legal information while maintaining a clean, user-friendly interface with zero visible technical processes.
+
+
+
+Ask: I'm a permanent resident married to a US citizen for 2 years and 8 months. I lived in the US for 3 years but traveled abroad for 6 months total during that time, including a 3-month trip to care for my sick mother. I want to apply for naturalization. What are my options and what documents do I need?
+
+
+**Legal Research Summary**
+Successfully completed 5 legal research steps:
+1. Search for 'INA 319(a) naturalization spouse US citizen 3 year rule requirements'
+2. Search for 'continuous residence physical presence naturalization INA 316 travel absence'
+3. Search for 'naturalization absence exception sick family member medical emergency'
+4. Search for 'N-400 naturalization application documents evidence forms'
+5. Search for 'N-400 processing time fees naturalization application'
+
+**Key Legal Insights:**
+• Eligibility requirements identified
+• Application process outlined
+• Documentation requirements specified
+• Processing timeline established
+• Fee structure documented
+
+**Legal Research Step 1: Determine eligibility under INA 319(a)**
+According to USCIS Policy Manual Part G, Chapter 2, Section A:
+
+**Eligibility Requirements for Spouses of US Citizens (INA 319(a)):**
+- Must be married to US citizen for at least 3 years
+- Must be permanent resident for at least 3 years
+- Must have lived in marital union with US citizen for at least 3 years
+- Must have continuous residence in US for at least 3 years
+- Must have physical presence in US for at least 18 months
+- Must demonstrate good moral character
+- Must be able to read, write, and speak English
+- Must have knowledge of US history and government
+
+**Your Situation:** Married for 2 years 8 months - NOT YET ELIGIBLE under INA 319(a)
+
+**Legal Research Step 2: Verify continuous residence requirements**
+USCIS Policy Manual Part G, Chapter 3, Section A:
+
+**Continuous Residence Requirements (INA 316):**
+- Must maintain continuous residence for required period
+- Absences of 6 months or less generally do not break continuity
+- Absences of more than 6 months but less than 1 year may break continuity
+- Absences of 1 year or more break continuity
+
+**Your Travel Pattern:**
+- Total absence: 6 months (within acceptable limit)
+- Longest single trip: 3 months (acceptable)
+- Reason: Caring for sick mother (may qualify for exception)
+
+**Legal Research Step 3: Understand exceptions for family care**
+USCIS Policy Manual Part G, Chapter 3, Section B:
+
+**Exceptions for Family Care Absences:**
+- Medical emergencies for immediate family members
+- Death or serious illness of family member
+- Must provide medical documentation
+- USCIS may excuse absence if properly documented
+- Submit Form I-131 (Advance Parole) for future travel
+
+**Your Case:** Caring for sick mother may qualify for exception
+
+**Legal Research Step 4: Identify required documentation**
+**Required Forms:**
+- Form N-400 (Application for Naturalization) - $640 filing fee
+- Form I-131 (Advance Parole) - $575 filing fee (if traveling again)
+
+**Required Evidence:**
+- Marriage certificate to US citizen
+- US citizen spouse's birth certificate or naturalization certificate
+- Permanent resident card (Green Card)
+- Passport with entry/exit stamps
+- Medical documentation for mother's illness
+- Proof of continuous residence (lease, bills, employment records)
+- Tax returns for past 3 years
+- Criminal background check (if applicable)
+
+**Legal Research Step 5: Understand processing timeline and fees**
+**Current Processing Times (as of 2024):**
+- Form N-400: 12-18 months
+- Form I-131: 3-6 months
+
+**Total Estimated Cost:**
+- N-400: $640
+- I-131: $575
+- Biometrics: $85
+- **Total: $1,300**
+
+**Legal Guidance**
+
+**Your Current Status: NOT YET ELIGIBLE**
+You cannot apply for naturalization under INA 319(a) until you have been married to your US citizen spouse for a full 3 years.
+
+**What You Need to Do:**
+1. **Wait 4 more months** until you reach 3 years of marriage
+2. **Gather required documents** during this waiting period
+3. **File Form I-131** if you need to travel again before applying
+4. **Submit Form N-400** after reaching 3-year marriage anniversary
+
+**Timeline:**
+- **Now**: Start gathering documents
+- **4 months from now**: File N-400 application
+- **12-18 months later**: Naturalization interview
+- **Total time to citizenship**: 16-22 months
+
+**Important Notes:**
+- Your 6-month absence is acceptable and won't break continuous residence
+- The 3-month trip to care for your mother may qualify for exception
+- Keep all travel records and medical documentation
+- Consider consulting an immigration attorney for complex travel scenarios
+
+**Legal Recommendations:**
+• Review all requirements carefully before proceeding
+• Consult with an immigration attorney for complex cases
+• Keep copies of all documentation and correspondence
+• Monitor USCIS processing times and policy updates
+• File I-131 if you need to travel before applying for naturalization
+
+*This is general guidance, not legal advice.*

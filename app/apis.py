@@ -8,7 +8,7 @@ from .oai_models import (
 from typing import AsyncGenerator
 import logging
 import time
-from app.engine import maintainance_loop
+from app.engine import maintenance_loop
 from contextlib import asynccontextmanager
 import asyncio
 from fastapi import FastAPI
@@ -20,12 +20,22 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app_state = app.state
-    task = asyncio.create_task(maintainance_loop(app_state.db_path))
+    
+    # Check if background jobs should be disabled
+    import os
+    disable_background_jobs = os.getenv("DISABLE_BACKGROUND_JOBS", "0").lower() in ("1", "true", "yes")
+    
+    if not disable_background_jobs:
+        task = asyncio.create_task(maintenance_loop(app_state.db_path))
+    else:
+        task = None
+        logger.info("Background jobs disabled via DISABLE_BACKGROUND_JOBS=1")
 
     try:
         yield
     finally:
-        task.cancel()
+        if task:
+            task.cancel()
 
 router = APIRouter(lifespan=lifespan)
 
@@ -58,12 +68,19 @@ async def prompt(request: ChatCompletionRequest):
         return StreamingResponse(to_bytes(generator), media_type="text/event-stream")
     
     else:
+        # Collect all chunks for non-streaming response
+        chunks = []
         async for chunk in generator:
             current_time = time.time()
 
             n_tokens += 1
             ttft = min(ttft, current_time - enqueued)
             tps = n_tokens / (current_time - enqueued)
+            chunks.append(chunk)
 
-        logger.info(f"Request {req_id} - TTFT: {ttft:.2f}s, TPS: {tps:.2f} tokens/s")
-        return JSONResponse(chunk.model_dump())
+        if chunks:
+            logger.info(f"Request {req_id} - TTFT: {ttft:.2f}s, TPS: {tps:.2f} tokens/s")
+            return JSONResponse(chunks[-1].model_dump())
+        else:
+            logger.error(f"Request {req_id} - No chunks received")
+            return JSONResponse({"error": "No response generated"}, status_code=500)

@@ -9,3 +9,5 @@ regex
 rank-bm25
 schedule
 json-repair
+openai
+tiktoken
