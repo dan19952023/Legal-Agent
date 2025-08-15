@@ -70,7 +70,7 @@ def _parse_step_obj(text: str) -> dict | None:
                     repaired = repaired[0]
                 data = json.loads(repaired)
             except Exception as e:
-                logger.error(f"Failed to parse response: {e}")
+                logger.error(f"Failed to parse response: {e}", exc_info=True)
                 return None
         if isinstance(data, dict) and isinstance(data.get('steps'), list) and len(data['steps']) > 0:
             data = data['steps'][0]
@@ -84,7 +84,7 @@ def _parse_step_obj(text: str) -> dict | None:
             return data
         return None
     except Exception as e:
-        logger.error(f"Unexpected error parsing step: {e}")
+        logger.error(f"Unexpected error parsing step: {e}", exc_info=True)
         return None
 
 async def make_plan(user_request: str, max_steps: int = 15) -> list[Step]:
@@ -155,7 +155,7 @@ If no more steps needed for comprehensive legal coverage, return: <done/>"""
                                 reasoning = resp_json.get('reason')
 
                             except Exception as err:
-                                logger.error(f"Error parsing JSON: {err}; Response: {response_text}")
+                                logger.error(f"Error parsing JSON: {err}; Response: {response_text}", exc_info=True)
 
                         if not reasoning:
                             reasoning = response_text.strip()
@@ -184,11 +184,11 @@ If no more steps needed for comprehensive legal coverage, return: <done/>"""
                             # Continue but log the issue
                         
                     except Exception as e:
-                        logger.error(f"Failed to parse response for step {step_count + 1}: {e}")
+                        logger.error(f"Failed to parse response for step {step_count + 1}: {e}", exc_info=True)
                         continue
                         
                 except Exception as api_error:
-                    logger.error(f"API error on step {step_count + 1}: {api_error}")
+                    logger.error(f"API error on step {step_count + 1}: {api_error}", exc_info=True)
                     break
 
             # Post-process validation
@@ -196,7 +196,7 @@ If no more steps needed for comprehensive legal coverage, return: <done/>"""
                 # Ensure we have at least one valid legal step
                 valid_steps = [step for step in list_of_steps if validate_legal_step(step)]
                 if not valid_steps:
-                    logger.error("No valid legal steps generated")
+                    logger.error("No valid legal steps generated", exc_info=True)
                     # Create a fallback step
                     fallback_step = Step(
                         reason="Fallback legal research step",
@@ -286,7 +286,7 @@ class Executor:
         # Format results efficiently
         formatted_results = []
         for result in results:
-            citation = f" (Section: {result.metadata.section})" if result.metadata.section else ""
+            citation = f" (Section: [{result.metadata.section}]({result.metadata.reference_url}))" if result.metadata.section else ""
             formatted_results.append(f"- {result.content}{citation}")
         
         return "\n".join(formatted_results)
@@ -602,13 +602,13 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
         return
         
     except Exception as e:
-        logger.error(f"Error in enhanced mode, falling back: {e}")
+        logger.error(f"Error in enhanced mode, falling back: {e}", exc_info=True)
         # Last-resort fallback
         try:
             answer = await quick_retrieval_answer(user_request, arm, time_budget=3)
             yield wrap_chunk(random_uuid(), answer, role='assistant')
         except Exception as fallback_error:
-            logger.error(f"Fallback also failed: {fallback_error}")
+            logger.error(f"Fallback also failed: {fallback_error}", exc_info=True)
             basic_response = f"""**Legal Information Request: {user_request}**
 
 I'm here to help with USCIS legal questions. Please try rephrasing your question or contact support if the issue persists.
@@ -736,7 +736,7 @@ async def execute_legal_step_optimized(executor: Executor, step: Step, legal_con
     except asyncio.TimeoutError:
         return f"**Legal Research Timeout:** {step.task}\n\n*Note: Search timed out after 15 seconds. This may indicate the query is too complex or the system is under heavy load.*"
     except Exception as e:
-        logger.error(f"Error executing legal step {step.task}: {e}")
+        logger.error(f"Error executing legal step {step.task}: {e}", exc_info=True)
         return f"**Legal Research Error:** {step.task}\n\n*Note: An error occurred during search execution. Please try rephrasing your question.*"
 
 async def execute_legal_analysis(legal_content: str, step_task: str, search_query: str) -> str:
@@ -786,7 +786,7 @@ Analyze the following legal content and provide SPECIFIC, ACTIONABLE legal guida
             return f"**Legal Analysis:**\n{legal_content[:2000]}..."
             
     except Exception as e:
-        logger.error(f"Error executing legal analysis: {e}")
+        logger.error(f"Error executing legal analysis: {e}", exc_info=True)
         # Fallback to structured content if LLM analysis fails
         return f"**Legal Content:**\n{legal_content[:2000]}..."
 
@@ -864,7 +864,7 @@ async def has_comprehensive_legal_coverage(output: str, completed_steps: list[St
         return basic_coverage and citation_coverage
         
     except Exception as e:
-        logger.error(f"Error checking legal coverage: {e}")
+        logger.error(f"Error checking legal coverage: {e}", exc_info=True)
         return False
 
 async def synthesize_comprehensive_legal_guidance(research_output: str, completed_steps: list[Step], legal_context: dict) -> str:
@@ -929,7 +929,7 @@ Synthesize all the legal research into SPECIFIC, ACTIONABLE guidance for the use
             return f"**Legal Guidance Summary:**\n{research_output[:2000]}..."
             
     except Exception as e:
-        logger.error(f"Error synthesizing comprehensive guidance: {e}")
+        logger.error(f"Error synthesizing comprehensive guidance: {e}", exc_info=True)
         # Fallback to structured summary if LLM synthesis fails
         return f"**Legal Guidance Summary:**\n{research_output[:2000]}..."
 
@@ -982,7 +982,7 @@ async def synthesize_legal_response(output: str, steps: list[Step], legal_contex
         return summary
         
     except Exception as e:
-        logger.error(f"Error synthesizing legal response: {e}")
+        logger.error(f"Error synthesizing legal response: {e}", exc_info=True)
         return output
 
 async def extract_legal_intent(query: str) -> dict:
@@ -1057,16 +1057,12 @@ async def quick_retrieval_answer(query: str, arm: AgentResourceManager, time_bud
     try:
         # Simple search for immediate answer
         executor = Executor()
-        search_result = await asyncio.wait_for(
-            executor.search(query),
-            timeout=time_budget
-        )
-        
-        if search_result and hasattr(search_result, 'choices'):
-            content = search_result.choices[0].delta.content or ""
+        search_result: str = await executor.search(query)
+
+        if search_result:
             return f"""**Quick Legal Answer**
 
-{content}
+{search_result}
 
 *This is a quick response. For comprehensive analysis, enable enhanced mode.*"""
         else:
@@ -1076,7 +1072,7 @@ I'm here to help with USCIS legal questions. This is a basic response.
 
 *For detailed legal research, please enable the enhanced response system.*"""
     except Exception as e:
-        logger.error(f"Quick retrieval failed: {e}")
+        logger.error(f"Quick retrieval failed: {e}", exc_info=True)
         return f"""**Legal Information Request: {query}**
 
 I'm here to help with USCIS legal questions. Please try rephrasing your question.

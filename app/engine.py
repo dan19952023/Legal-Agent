@@ -142,7 +142,7 @@ async def embed(texts: list[str], model_id: str) -> list[list[float]]:
 
             return [e['embedding'] for e in response_json.get('data', [])]
 
-@limit_asyncio_concurrency(num_of_concurrent_calls=8)
+@limit_asyncio_concurrency(num_of_concurrent_calls=14)
 async def embed_bg(texts: list[str], model_id: str):
     return await embed(texts, model_id)
 
@@ -283,29 +283,30 @@ async def search(
     merged_chunks = []
     
     for _id, _doc, _metadata, _distance in zip(ids, docs, metadatas, distances):
-        # Skip generic overview content
-        if _doc.startswith("U.S. citizenship is a unique bond") or _doc.startswith("This volume of the USCIS Policy Manual"):
-            continue
+        final_results.append(SearchResult(id=_id, content=_doc, metadata=_metadata, distance=_distance))
+
+        # # Skip generic overview content
+        # if _doc.startswith("U.S. citizenship is a unique bond") or _doc.startswith("This volume of the USCIS Policy Manual"):
+        #     continue
             
-        # Check if this chunk overlaps with any existing merged chunk
-        merged = False
-        for i, existing_chunk in enumerate(merged_chunks):
-            was_merged, merged_content = detect_and_merge_overlap(merged_chunks[i], _doc)
-            if was_merged:
-                # Update the merged chunk content
-                merged_chunks[i] = merged_content
-                merged = True
-                break
+        # # Check if this chunk overlaps with any existing merged chunk
+        # merged = False
+        # for i, existing_chunk in enumerate(merged_chunks):
+        #     was_merged, merged_content = detect_and_merge_overlap(merged_chunks[i], _doc)
+        #     if was_merged:
+        #         # Update the merged chunk content
+        #         merged_chunks[i] = merged_content
+        #         merged = True
+        #         break
         
-        if not merged:
-            # Create new merged chunk
-            merged_chunks.append(_doc)
-            final_results.append(SearchResult(id=_id, content=_doc, metadata=_metadata, distance=_distance))
+        # if not merged:
+        #     # Create new merged chunk
+        #     merged_chunks.append(_doc)
         
-        # Limit results
-        if len(final_results) >= max_results:
-            break
-    
+        # # Limit results
+        # if len(final_results) >= max_results:
+        #     break
+
     return final_results
 
 def detect_and_merge_overlap(chunk1: str, chunk2: str, overlap_threshold: int = 100) -> tuple[bool, str]:
@@ -446,6 +447,7 @@ def load_db(db_path: str) -> Database | None:
                 metadata=Metadata(**item.get('metadata', {}))
             )
             for item in data_json.get("data", [])
+            if len(item['content']) > 200
         ],
         metadata=DatabaseMetadata(**data_json.get("metadata", {}))
     )

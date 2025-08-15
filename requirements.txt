@@ -11,3 +11,4 @@ schedule
 json-repair
 openai
 tiktoken
+scikit-learn
