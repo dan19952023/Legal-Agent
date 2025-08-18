@@ -251,24 +251,35 @@ PLANNER_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "make_plan",
-            "description": "Make a plan for the next step",
+            "name": "legal_analysis_plan",
+            "description": "Create a comprehensive legal analysis plan with specific steps for immigration law questions",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "expectations": {
+                    "legal_issue": {
                         "type": "string",
-                        "description": "The expectations for the next step"
+                        "description": "The specific legal question or issue being addressed"
                     },
-                    "steps": {
+                    "legal_basis": {
+                        "type": "string",
+                        "description": "Relevant laws, policies, or regulations that apply"
+                    },
+                    "analysis_steps": {
                         "type": "array",
-                        "description": "Step by step to meet the expectations",
-                        "items": {
-                            "type": "string"
-                        }
+                        "items": {"type": "string"},
+                        "description": "Step-by-step legal analysis and research process"
+                    },
+                    "required_documents": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Legal forms and documents that may be needed"
+                    },
+                    "timeline": {
+                        "type": "string",
+                        "description": "Expected processing times and important deadlines"
                     }
                 },
-                "required": ["expectations", "steps"]
+                "required": ["legal_issue", "legal_basis", "analysis_steps"]
             }
         }
     }
@@ -284,10 +295,33 @@ def get_executor_ability(executor: Executor) -> str:
 from app.lite_keybert import KeyBERT
 
 async def get_system_prompt(chat_history: list[dict[str, str]], executor: Executor) -> str:
-    system_prompt = "Your task is to make plan, review the result of the executor and response to the user accurately."
+    # Base legal assistant prompt
+    system_prompt = """You are an immigration law specialist with expertise in:
+- U.S. Citizenship and Immigration Services (USCIS) policies
+- Family-based immigration (spouse, parent, child petitions)
+- Employment-based immigration (work visas, green cards)
+- Naturalization and citizenship processes
+- Immigration court procedures and appeals
+
+Your responsibilities:
+1. **Legal Research**: Search the USCIS Policy Manual and related legal databases
+2. **Process Guidance**: Explain step-by-step procedures for immigration applications
+3. **Eligibility Assessment**: Help users understand qualification requirements
+4. **Document Preparation**: Guide users on required forms and documentation
+5. **Timeline Information**: Provide realistic processing time expectations
+
+Response Format:
+- Start with a clear summary of the legal issue
+- Provide step-by-step guidance with specific form numbers
+- Include relevant USCIS policy citations
+- Add important warnings about deadlines and requirements
+- End with next steps and when to seek legal counsel"""
+
+    # Add executor capabilities
     executor_ability = get_executor_ability(executor)
     system_prompt += f"\nExecutor ability:\n{executor_ability}"
 
+    # Add legal context from database
     user_messages = get_user_messages(chat_history, 3)
     kw_thresold = 0.5
     top_k = 3
