@@ -1,0 +1,116 @@
+Let me trace through the codebase to show you exactly how this agent generates answers. Let me examine the key components:
+
+Read file: app/agent.py
+Read file: app/agent.py
+Read file: app/agent.py
+Now let me check the search function in the engine:
+
+Read file: app/engine.py
+Based on my analysis of the codebase, here's exactly how this Legal-Agent generates answers:
+
+## **Answer Generation Flow**
+
+### **1. User Input Processing**
+```
+User Query → handle_prompt() → get_system_prompt()
+```
+
+### **2. System Prompt Creation**
+The agent creates a system prompt that includes:
+- **Base instruction**: "Make plan, review executor results, respond accurately"
+- **Executor capabilities**: Available tools (search, python)
+- **Relevant legal context**: Extracted from database using keywords
+
+### **3. Planning Phase**
+```
+LLM + PLANNER_TOOLS → make_plan() → expectations + steps
+```
+
+The LLM creates a plan with:
+- **Expectations**: What needs to be accomplished
+- **Steps**: How to accomplish it
+
+### **4. Execution Phase**
+```
+Executor.execute() → Tool Execution → Results
+```
+
+**Available Tools:**
+- **`search`**: Searches the legal database using semantic similarity
+- **`python`**: Runs Python code for calculations/analysis
+
+### **5. Search Process (Most Common)**
+```
+Query → embed() → ChromaDB query → SearchResults → Formatted response
+```
+
+**Detailed Search Flow:**
+1. **Text Embedding**: Convert query to vector using OpenAI API
+2. **Vector Search**: Find similar documents in ChromaDB
+3. **Result Processing**: Format results with distances and metadata
+4. **Response Generation**: LLM synthesizes final answer
+
+### **6. Final Answer Assembly**
+```
+Tool Results + LLM Synthesis → Streaming Response → User
+```
+
+## **Key Components in Answer Generation**
+
+### **A. Database Search (`app/engine.py`)**
+```python
+async def search(queries, max_results=10, semantic_weight=0.8):
+    # 1. Generate embeddings for query
+    embeddings = await embed(queries, model_id)
+    
+    # 2. Query ChromaDB vector database
+    results = collection.query(
+        query_embeddings=embeddings,
+        n_results=max_results
+    )
+    
+    # 3. Return formatted results
+    return SearchResult objects
+```
+
+### **B. Tool Execution (`app/agent.py`)**
+```python
+async def execute_tool(self, tool_name: str, tool_args: dict):
+    if tool_name == "search":
+        return await self.search(tool_args["query"])
+    elif tool_name == "python":
+        return await self.python(tool_args["code"])
+```
+
+### **C. LLM Integration (`app/oai_streaming.py`)**
+```python
+async def create_streaming_response(base_url, headers, model, messages, tools):
+    # Stream response from LLM API
+    # Handle tool calls and content generation
+```
+
+## **Answer Generation Example**
+
+**User Query**: "How do I apply for a green card?"
+
+**1. Planning**: LLM creates plan with search steps
+**2. Search**: Agent searches database for "green card application"
+**3. Results**: Finds relevant USCIS policy documents
+**4. Synthesis**: LLM combines search results into coherent answer
+**5. Response**: Streams formatted legal advice to user
+
+## **What Makes This Agent Unique**
+
+1. **Two-Phase Approach**: Planning → Execution
+2. **Semantic Search**: Uses embeddings, not just keywords
+3. **Tool Integration**: Can search database AND run code
+4. **Streaming Responses**: Real-time answer generation
+5. **Legal Context**: Leverages your 5,265-item legal database
+
+## **Current Limitations**
+
+1. **Keyword Extraction Issues**: Sometimes fails to extract relevant terms
+2. **Empty Search Handling**: No fallback when semantic search fails
+3. **Single Search Strategy**: Only uses vector similarity, no keyword fallback
+
+The agent essentially works as a **smart legal research assistant** that combines database search with LLM reasoning to generate comprehensive legal answers.

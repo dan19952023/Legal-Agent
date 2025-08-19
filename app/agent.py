@@ -95,6 +95,7 @@ class Executor:
 
         return "\n".join([f"- {result.content} (distance: {result.distance})" for result in results])
 
+
     async def python(self, code: str) -> str:
         variables = []
         tree = ast.parse(code)
@@ -122,7 +123,7 @@ class Executor:
                         if isinstance(target, ast.Name):
                             variables.append(target.id)
 
-        return_variables = set(return_variables)
+        return_variables = set(variables)
 
         for var in variables:
             if var in return_variables:
@@ -310,12 +311,24 @@ Your responsibilities:
 4. **Document Preparation**: Guide users on required forms and documentation
 5. **Timeline Information**: Provide realistic processing time expectations
 
-Response Format:
-- Start with a clear summary of the legal issue
-- Provide step-by-step guidance with specific form numbers
-- Include relevant USCIS policy citations
-- Add important warnings about deadlines and requirements
-- End with next steps and when to seek legal counsel"""
+CITATION REQUIREMENTS:
+- **ALWAYS include direct URLs** to USCIS Policy Manual sections when available
+- **Provide clickable links** using Markdown link format `[Title](URL)`
+- **Reference specific volume, chapter, and section numbers** with links
+- **Include form download links** from USCIS website
+- **Add links to relevant USCIS pages** for additional information
+
+Response Format (Markdown):
+- Start with a **Summary** section
+- Provide a **Step-by-Step Guidance** section with numbered lists
+- Add **Policy Citations with Markdown links**
+- Add **Warnings / Important Notes**
+- End with a **Sources & Links** section in bullet point format with clickable Markdown links
+- Always remind users to seek legal counsel for specific cases
+
+IMPORTANT: Every piece of legal information should be backed by a Markdown link when possible.
+"""
+
 
     # Add executor capabilities
     executor_ability = get_executor_ability(executor)
@@ -400,9 +413,9 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
             tool_name = call.function.name
             tool_args = json.loads(call.function.arguments)
             
-            if tool_name == 'make_plan':
-                expectations += tool_args['expectations'] + '\n'
-                steps.extend(tool_args['steps'])
+            if tool_name == 'legal_analysis_plan':
+                expectations += tool_args['legal_issue'] + '\n'
+                steps.extend(tool_args['analysis_steps'])
 
         call_id = random_uuid()
 
@@ -414,10 +427,13 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
                     'id': call_id,
                     'type': 'function',
                     'function': {
-                        'name': 'make_plan',
+                        'name': 'legal_analysis_plan',
                         'arguments': json.dumps({
-                            'expectations': expectations,
-                            'steps': steps
+                            'legal_issue': expectations,
+                            'legal_basis': tool_args['legal_basis'],
+                            'analysis_steps': steps,
+                            'required_documents': tool_args['required_documents'],
+                            'timeline': tool_args['timeline']
                         })
                     }
                 }
