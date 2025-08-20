@@ -1,19 +1,6 @@
 from typing import AsyncGenerator
-from app.oai_models import ChatCompletionStreamResponse, ChatCompletionResponse
-from app.configs import settings
-from app.utils import (
-    wrap_chunk, 
-    random_uuid, 
-    strip_markers,
-    refine_mcp_response,
-    AgentResourceManager, 
-    refine_chat_history,
-    get_user_messages,
-    refine_assistant_message
-)
-from app.oai_streaming import create_streaming_response, ChatCompletionResponseBuilder
+# Standard library imports
 import json
-from functools import lru_cache
 import base64
 import os
 import logging
@@ -22,8 +9,29 @@ import subprocess
 import sys
 import asyncio
 import resource
-from app.engine import get_db_info, search as db_search, get_active_collection
+from functools import lru_cache
+
+# Third-party imports
 from pydantic import BaseModel
+
+# Local app imports
+from app.configs import settings
+from app.engine import get_db_info, search as db_search, get_active_collection
+from app.oai_models import (
+    ChatCompletionStreamResponse, 
+    ChatCompletionResponse,
+    random_uuid
+)
+from app.oai_streaming import create_streaming_response, ChatCompletionResponseBuilder
+from app.utils import (
+    strip_markers,
+    refine_mcp_response,
+    AgentResourceManager, 
+    refine_chat_history,
+    get_user_messages,
+    refine_assistant_message,
+    wrap_chunk
+)
 
 logger = logging.getLogger(__name__)
 
@@ -158,12 +166,18 @@ class Executor:
         
     async def execute_tool(self, tool_name: str, tool_args: dict[str, str]) -> str:
         if tool_name == "search":
-            logger.info(f'Executing search: {tool_args["query"]} ({tool_args["reasoning"]})')
-            return await self.search(tool_args["query"])
+            query = tool_args.get("query", "")
+            if not query:
+                return "No query provided"
+            logger.info(f'Executing search: {query} ({tool_args["reasoning"]})')
+            return await self.search(query)
 
         if tool_name == "python":
-            logger.info(f'Executing python code: {tool_args["code"]} ({tool_args["reasoning"]})')
-            return await self.python(tool_args["code"])
+            code = tool_args.get("code", "")
+            if not code:
+                return "No code provided"
+            logger.info(f'Executing python code: {code} ({tool_args["reasoning"]})')
+            return await self.python(code)
 
         raise ValueError(f"Unknown tool: {tool_name}")
 
@@ -259,28 +273,54 @@ PLANNER_TOOLS = [
                 "properties": {
                     "legal_issue": {
                         "type": "string",
-                        "description": "The specific legal question or issue being addressed"
+                        "description": "The legal issue to analyze"
                     },
                     "legal_basis": {
                         "type": "string",
-                        "description": "Relevant laws, policies, or regulations that apply"
+                        "description": "The legal basis for the analysis"
                     },
-                    "analysis_steps": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Step-by-step legal analysis and research process"
-                    },
+                    "analysis_steps": {"type": "array", "items": {"type": "string"}},
                     "required_documents": {
-                        "type": "array",
+                        "type": "array", 
                         "items": {"type": "string"},
-                        "description": "Legal forms and documents that may be needed"
+                        "description": "The required documents for the analysis"
                     },
                     "timeline": {
                         "type": "string",
-                        "description": "Expected processing times and important deadlines"
+                        "description": "The timeline for the analysis"
                     }
                 },
                 "required": ["legal_issue", "legal_basis", "analysis_steps"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search",
+            "description": "Search the USCIS Policy Manual database for relevant legal information",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query for legal information"},
+                    "reasoning": {"type": "string", "description": "Why this search query is chosen"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "python",
+            "description": "Run python code for data analysis or calculations",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string"},
+                    "reasoning": {"type": "string"}
+                },
+                "required": ["code"]
             }
         }
     }
@@ -327,6 +367,8 @@ Response Format (Markdown):
 - Always remind users to seek legal counsel for specific cases
 
 IMPORTANT: Every piece of legal information should be backed by a Markdown link when possible.
+
+PLANNER RULE: You MUST call the `legal_analysis_plan` tool BEFORE giving any final answer. Always plan first, then search for relevant information, then provide a structured response with citations.
 """
 
 
@@ -336,7 +378,7 @@ IMPORTANT: Every piece of legal information should be backed by a Markdown link 
 
     # Add legal context from database
     user_messages = get_user_messages(chat_history, 3)
-    kw_thresold = 0.5
+    kw_threshold = 0.5
     top_k = 3
 
     try:
@@ -348,7 +390,7 @@ IMPORTANT: Every piece of legal information should be backed by a Markdown link 
             use_maxsum=False,
             use_mmr=True,
             diversity=0.7,
-            threshold=kw_thresold,
+            threshold=kw_threshold,
             merge=True
         )
 
@@ -382,6 +424,7 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
     arm = AgentResourceManager()
     messages = refine_chat_history(messages, system_prompt, arm)
 
+    reminded_no_tools = False
     while True:
         generator = create_streaming_response(
             base_url=settings.llm_base_url,
@@ -398,49 +441,90 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
         async for chunk in generator:
             response_builder.add_chunk(chunk)
 
-            if chunk.choices[0].delta.content:
+            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                 yield chunk
 
         completion = await response_builder.build()
+        assistant_message = completion.choices[0].message
+        tool_calls = assistant_message.tool_calls or []
+        
+        # Log tool calls for debugging
+        logger.info(f"[agent] tool_calls={[(tc.function.name, tc.id) for tc in tool_calls]}")
 
-        if not (completion.choices[0].message.tool_calls or []):
-            break
+        # if the assistant message is not a tool call, give it one more guided chance
+        if not tool_calls:
+            if not reminded_no_tools:   
+                messages.append({
+                    "role": "system",
+                    "content": "Reminder: Call the `legal_analysis_plan` tool first, then use `search` as needed. Do not finalize an answer without citations."
+                })
+                reminded_no_tools = True
 
+            # try one guided retry; if it still doesn't call tools, it'll break next loop naturally
+            continue
+        else:
+            reminded_no_tools = False
+
+        # append message with tool calls to history
+        messages.append(
+            {
+                'role': 'assistant',
+                'content': assistant_message.content or '',
+                'tool_calls': [
+                    {
+                        'id': tool_call.id,
+                        'type': 'function',
+                        'function': {
+                            'name': tool_call.function.name,
+                            'arguments': tool_call.function.arguments
+                        }
+                    } for tool_call in tool_calls
+                ]
+            }
+        )
+
+        # extract tool call arguments
         expectations = ''
-        steps = []
+        steps: list[str] = []
+        legal_basis = None
+        required_documents: list[str] = []
+        timeline = None
 
-        for call in (completion.choices[0].message.tool_calls or []):
+        for call in tool_calls:
             tool_name = call.function.name
-            tool_args = json.loads(call.function.arguments)
-            
+            try:
+                raw_args = call.function.arguments or '{}'
+                tool_args = json.loads(raw_args)
+            except Exception:
+                tool_args = {}
+
+
             if tool_name == 'legal_analysis_plan':
-                expectations += tool_args['legal_issue'] + '\n'
-                steps.extend(tool_args['analysis_steps'])
+                legal_issue = tool_args.get('legal_issue', '')
+                if legal_issue:
+                    expectations += legal_issue + '\n'
+                steps.extend(tool_args.get('analysis_steps', []))
+                if not legal_basis:
+                    legal_basis = tool_args.get('legal_basis', '')
+                if not required_documents:
+                    rd = tool_args.get('required_documents') or []
+                    if isinstance(rd, list):
+                        required_documents = rd  # keep as list; format later when rendering
+                if not timeline:
+                    timeline = tool_args.get('timeline', '')
+            else:
+                # run other tools:
+                result = await executor.execute_tool(tool_name, tool_args)
+                messages.append({
+                    'role': 'tool',
+                    'tool_call_id': call.id,
+                    'content': result
+                })
+        # find original planner call id:
+        planner_call_id = next((c.id for c in tool_calls if c.function.name == "legal_analysis_plan"), None)
 
-        call_id = random_uuid()
-
-        messages.append({
-            'role': 'assistant',
-            'content': '',
-            'tool_calls': [
-                {
-                    'id': call_id,
-                    'type': 'function',
-                    'function': {
-                        'name': 'legal_analysis_plan',
-                        'arguments': json.dumps({
-                            'legal_issue': expectations,
-                            'legal_basis': tool_args['legal_basis'],
-                            'analysis_steps': steps,
-                            'required_documents': tool_args['required_documents'],
-                            'timeline': tool_args['timeline']
-                        })
-                    }
-                }
-            ]
-        })
-
-        if len(steps) > 0:
+        # if planner call id is found, append the result to the planner call
+        if planner_call_id and steps:
             output = ''
 
             try:
@@ -460,11 +544,16 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
                 yield wrap_chunk(random_uuid(), "</agent_message>", role='assistant')
                 output = refine_mcp_response(output, arm)
 
-        else:
-            output = 'Please specify at least one step for the executor to run.'
+            messages.append({
+                'role': 'tool',
+                'tool_call_id': planner_call_id,
+                'content': output
+            })
+        elif planner_call_id:
+            # return the result of the planner call
+            messages.append({
+                'role': 'tool',
+                'tool_call_id': planner_call_id,
+                'content': 'Please specify at least one step for the executor to run.'
+            })
 
-        messages.append({
-            "role": "tool",
-            "tool_call_id": call_id,
-            "content": output
-        })
