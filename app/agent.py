@@ -35,6 +35,13 @@ from app.utils import (
 
 logger = logging.getLogger(__name__)
 
+import re
+def _has_required_citations(text: str) -> bool:
+    if not text: 
+        return False
+    has_link = bool(re.search(r'https?://(www\.)?uscis\.gov/policy-manual', text))
+    has_label = bool(re.search(r'Volume\s+\w+\s+Chapter\s+\w+(?:\s+Section\s+\w+)?', text, re.I))
+    return has_link and has_label
 
 @lru_cache(maxsize=1)
 def get_avatar() -> str:
@@ -293,7 +300,7 @@ PLANNER_TOOLS = [
                 "required": ["user_request", "reasoning_steps", "identified_components"]
             }
         }
-    }
+    },
     {
         "type": "function",
         "function": {
@@ -400,7 +407,7 @@ Use this exact section order in your answer:
 
 IMPORTANT: Every piece of legal information should be backed by a Markdown link when possible.
 
-PLANNER RULE: You MUST call the `legal_analysis_plan` tool BEFORE giving any final answer. Always plan first, then search for relevant information, then provide a structured response with citations.
+PLANNER RULE: You MUST call the `cot_planning` tool BEFORE calling the `legal_analysis_plan` tool, then `search` and `python` as needed. Always plan first, then search for relevant information, then provide a structured response with citations.
 """
 
 
@@ -440,7 +447,6 @@ PLANNER RULE: You MUST call the `legal_analysis_plan` tool BEFORE giving any fin
 
         if hits:
             system_prompt += f"\nReferences:"
-
             for hit in hits:
                 system_prompt += f"\n- {hit.content}"
 
@@ -448,6 +454,8 @@ PLANNER RULE: You MUST call the `legal_analysis_plan` tool BEFORE giving any fin
         logger.error(f'Error while extracting flatterned_keywords and searching for relevant information: {err}', exc_info=True)
     
     return system_prompt
+
+
 
 async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCompletionStreamResponse | ChatCompletionResponse, None]:
     executor = Executor()
@@ -488,6 +496,16 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
 
         # if the assistant message is not a tool call, give it one more guided chance
         if not tool_calls:
+            if legal_analysis_plan_called and (assistant_message.content or "").strip():
+                if not _has_required_citations(assistant_message.content):
+                    messages.append({
+                        "role": "system",
+                        "content": "Add at least one USCIS Policy Manual link with Volume/Chapter/Section, then continue. Do not finalize without citations."
+                    })
+                    reminded_no_tools = False
+                    continue
+                break
+
             if not reminded_no_tools:   
                 if not cot_planning_called:
                     messages.append({
@@ -553,7 +571,7 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
                     'content': f"CoT planning completed: {tool_args}"
                 })
 
-            if tool_name == 'legal_analysis_plan':
+            elif tool_name == 'legal_analysis_plan':
                 legal_analysis_plan_called = True
                 legal_issue = tool_args.get('legal_issue', '')
                 if legal_issue:
@@ -572,7 +590,8 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
                     'tool_call_id': call.id,
                     'content': f"Legal analysis plan completed: {tool_args}"
                 })
-            else:
+
+            elif tool_name in ['search', 'python']:
                 # run other tools:
                 result = await executor.execute_tool(tool_name, tool_args)
                 messages.append({
@@ -580,6 +599,34 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
                     'tool_call_id': call.id,
                     'content': result
                 })
+            else:
+                logger.error(f"Unknown tool: {tool_name}")
+
+        if cot_planning_called and not legal_analysis_plan_called and cot_data:
+            rs = cot_data.get('reasoning_steps') or []
+            ic = cot_data.get('identified_components') or []
+            analysis_steps = [f"{i}. {s}" for i, s in enumerate([*rs, *ic], start=1)]
+
+            messages.append({
+                'role': 'assistant',
+                'content': '',
+                'tool_calls': [{
+                    'id': random_uuid(),
+                    'type': 'function',
+                    'function': {
+                        'name': 'legal_analysis_plan',
+                        'arguments': json.dumps({
+                            'legal_issue': cot_data.get('user_request', ''),
+                            'legal_basis': 'USCIS Policy Manual; CFR',
+                            'analysis_steps': analysis_steps,
+                            'required_documents': [],
+                            'timeline': ''
+                        })
+                    }
+                }]
+            })
+            continue  
+
         # find original planner call id:
         planner_call_id = next((c.id for c in tool_calls if c.function.name == "legal_analysis_plan"), None)
 

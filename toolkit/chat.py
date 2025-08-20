@@ -53,23 +53,33 @@ if __name__ == "__main__":
             if chunk and chunk.startswith(b"data: "):
                 chunk = chunk[6:]
         
-                if chunk == b"[DONE]":
-                    break
+            if chunk == b"[DONE]":
+                break
                 
-                try:
-                    decoded_chunk = chunk.decode("utf-8")
-                    json_chunk = json.loads(decoded_chunk)
-                    content = json_chunk["choices"][0]["delta"]["content"]
-                    role = json_chunk["choices"][0]["delta"]["role"]
+            try:
+                decoded_chunk = chunk.decode("utf-8")
+                json_chunk = json.loads(decoded_chunk)
+                
+                # Handle error responses
+                if "error" in json_chunk:
+                    print(f"Error: {json_chunk['error']}")
+                    break
+                    
+                content = json_chunk["choices"][0]["delta"]["content"]
+                role = json_chunk["choices"][0]["delta"]["role"]
 
-                    print(content or '', end="", flush=True)
+                print(content or '', end="", flush=True)
 
-                    if role in [None, "assistant"]:
-                        assistant_message += content or ''
+                if role in [None, "assistant"]:
+                    assistant_message += content or ''
 
-                except Exception as e:
-                    print(f"Error: {e}")
-                    print(f"Chunk: {chunk}")
+            except json.JSONDecodeError:
+                # Skip malformed JSON chunks
+                continue
+            except Exception as e:
+                print(f"Error parsing chunk: {e}")
+                print(f"Chunk: {chunk}")
+                continue
 
         messages.append({"role": "assistant", "content": assistant_message})
         print("\n" * 2)
