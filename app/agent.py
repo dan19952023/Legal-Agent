@@ -169,14 +169,14 @@ class Executor:
             query = tool_args.get("query", "")
             if not query:
                 return "No query provided"
-            logger.info(f'Executing search: {query} ({tool_args["reasoning"]})')
+            logger.info(f'Executing search: {query} ({tool_args.get("reasoning", "")})')
             return await self.search(query)
 
         if tool_name == "python":
             code = tool_args.get("code", "")
             if not code:
                 return "No code provided"
-            logger.info(f'Executing python code: {code} ({tool_args["reasoning"]})')
+            logger.info(f'Executing python code: {code} ({tool_args.get("reasoning", "")})')
             return await self.python(code)
 
         raise ValueError(f"Unknown tool: {tool_name}")
@@ -263,6 +263,37 @@ class Executor:
         self.compact_history()
 
 PLANNER_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "cot_planning",
+            "description": "Use Chain-of-Thought reasoning to break down complex legal requests into logical steps before creating the legal analysis plan",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_request": {
+                        "type": "string",
+                        "description": "The user's original legal question or request"
+                    },
+                    "reasoning_steps": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "The logical reasoning steps identified"
+                    },
+                    "identified_components": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Key legal components that need to be analyzed"
+                    },
+                    "planning_summary": {
+                        "type": "string",
+                        "description": "Summary of the planning approach"
+                    }
+                },
+                "required": ["user_request", "reasoning_steps", "identified_components"]
+            }
+        }
+    }
     {
         "type": "function",
         "function": {
@@ -358,13 +389,14 @@ CITATION REQUIREMENTS:
 - **Include form download links** from USCIS website
 - **Add links to relevant USCIS pages** for additional information
 
-Response Format (Markdown):
-- Start with a **Summary** section
-- Provide a **Step-by-Step Guidance** section with numbered lists
-- Add **Policy Citations with Markdown links**
-- Add **Warnings / Important Notes**
-- End with a **Sources & Links** section in bullet point format with clickable Markdown links
-- Always remind users to seek legal counsel for specific cases
+Use this exact section order in your answer:
+1) Summary
+2) Eligibility
+3) Exceptions / Waivers
+4) Filing Checklist
+5) Processing & RFEs
+6) Common Pitfalls
+7) Sources & Links (USCIS PM + forms)
 
 IMPORTANT: Every piece of legal information should be backed by a Markdown link when possible.
 
@@ -425,6 +457,9 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
     messages = refine_chat_history(messages, system_prompt, arm)
 
     reminded_no_tools = False
+    cot_planning_called = False
+    legal_analysis_plan_called = False
+
     while True:
         generator = create_streaming_response(
             base_url=settings.llm_base_url,
@@ -454,13 +489,23 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
         # if the assistant message is not a tool call, give it one more guided chance
         if not tool_calls:
             if not reminded_no_tools:   
-                messages.append({
-                    "role": "system",
-                    "content": "Reminder: Call the `legal_analysis_plan` tool first, then use `search` as needed. Do not finalize an answer without citations."
-                })
+                if not cot_planning_called:
+                    messages.append({
+                        "role": "system",
+                        "content": "Reminder: First use the `cot_planning` tool to break down the request, then use `legal_analysis_plan` to create the legal framework."
+                    })
+                elif not legal_analysis_plan_called:
+                    messages.append({
+                        "role": "system",
+                        "content": "Reminder: Now use the `legal_analysis_plan` tool to create the legal analysis framework based on the CoT planning."
+                    })
+                else:
+                    messages.append({
+                        "role": "system",
+                        "content": "Reminder: Use `search` as needed to gather information. Do not finalize an answer without citations."
+                    })
                 reminded_no_tools = True
-
-            # try one guided retry; if it still doesn't call tools, it'll break next loop naturally
+                continue
             continue
         else:
             reminded_no_tools = False
@@ -489,6 +534,7 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
         legal_basis = None
         required_documents: list[str] = []
         timeline = None
+        cot_data = {}
 
         for call in tool_calls:
             tool_name = call.function.name
@@ -498,8 +544,17 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
             except Exception:
                 tool_args = {}
 
+            if tool_name == 'cot_planning':
+                cot_data = tool_args
+                cot_planning_called = True
+                messages.append({
+                    'role': 'tool',
+                    'tool_call_id': call.id,
+                    'content': f"CoT planning completed: {tool_args}"
+                })
 
             if tool_name == 'legal_analysis_plan':
+                legal_analysis_plan_called = True
                 legal_issue = tool_args.get('legal_issue', '')
                 if legal_issue:
                     expectations += legal_issue + '\n'
@@ -512,6 +567,11 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
                         required_documents = rd  # keep as list; format later when rendering
                 if not timeline:
                     timeline = tool_args.get('timeline', '')
+                messages.append({
+                    'role': 'tool',
+                    'tool_call_id': call.id,
+                    'content': f"Legal analysis plan completed: {tool_args}"
+                })
             else:
                 # run other tools:
                 result = await executor.execute_tool(tool_name, tool_args)
