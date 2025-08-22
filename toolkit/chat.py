@@ -6,12 +6,17 @@ import time
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--address", type=str, default="http://localhost:8001/prompt")
+    parser.add_argument("--message", type=str, default=None, help="Initial message to send")
     args = parser.parse_args()
 
     user_messages = [
-        'hi',
+        "hi",
+        "how can I apply for green card?",
+        "I am a software engineer, and I want to apply for green card",
     ]
-
+    if args.message:
+        user_messages = [args.message]
+    
     user_messages_it = iter(user_messages)
     messages = []
     
@@ -26,6 +31,8 @@ if __name__ == "__main__":
         if message is None:
             message = input("\n\nType your message (or 'exit' to quit): ")
 
+        if message.lower() == 'exit':
+            break
 
         print("\n" * 2)
         print("User: ", message, end="", flush=True)
@@ -53,33 +60,23 @@ if __name__ == "__main__":
             if chunk and chunk.startswith(b"data: "):
                 chunk = chunk[6:]
         
-            if chunk == b"[DONE]":
-                break
-                
-            try:
-                decoded_chunk = chunk.decode("utf-8")
-                json_chunk = json.loads(decoded_chunk)
-                
-                # Handle error responses
-                if "error" in json_chunk:
-                    print(f"Error: {json_chunk['error']}")
+                if chunk == b"[DONE]":
                     break
-                    
-                content = json_chunk["choices"][0]["delta"]["content"]
-                role = json_chunk["choices"][0]["delta"]["role"]
+                
+                try:
+                    decoded_chunk = chunk.decode("utf-8")
+                    json_chunk = json.loads(decoded_chunk)
+                    content = json_chunk["choices"][0]["delta"]["content"]
+                    role = json_chunk["choices"][0]["delta"]["role"]
 
-                print(content or '', end="", flush=True)
+                    print(content or '', end="", flush=True)
 
-                if role in [None, "assistant"]:
-                    assistant_message += content or ''
+                    if role in [None, "assistant"]:
+                        assistant_message += content or ''
 
-            except json.JSONDecodeError:
-                # Skip malformed JSON chunks
-                continue
-            except Exception as e:
-                print(f"Error parsing chunk: {e}")
-                print(f"Chunk: {chunk}")
-                continue
+                except Exception as e:
+                    print(f"Error: {e}")
+                    print(f"Chunk: {chunk}")
 
         messages.append({"role": "assistant", "content": assistant_message})
         print("\n" * 2)
