@@ -708,100 +708,13 @@ class CompletionRequest(OpenAIBaseModel):
         return data
 
 
-class EmbeddingCompletionRequest(OpenAIBaseModel):
-    # Ordered by official OpenAI API documentation
-    # https://platform.openai.com/docs/api-reference/embeddings
-    model: Optional[str] = None
-    input: Union[list[int], list[list[int]], str, list[str]]
-    encoding_format: Literal["float", "base64"] = "float"
-    dimensions: Optional[int] = None
-    user: Optional[str] = None
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
-
-    # doc: begin-embedding-pooling-params
-    additional_data: Optional[Any] = None
-    # doc: end-embedding-pooling-params
-
-    # doc: begin-embedding-extra-params
-    add_special_tokens: bool = Field(
-        default=True,
-        description=(
-            "If true (the default), special tokens (e.g. BOS) will be added to "
-            "the prompt."),
-    )
-    priority: int = Field(
-        default=0,
-        description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."),
-    )
 
 
-class EmbeddingChatRequest(OpenAIBaseModel):
-    model: Optional[str] = None
-    messages: list[ChatCompletionMessageParam]
-
-    encoding_format: Literal["float", "base64"] = "float"
-    dimensions: Optional[int] = None
-    user: Optional[str] = None
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
-
-    # doc: begin-chat-embedding-pooling-params
-    additional_data: Optional[Any] = None
-    # doc: end-chat-embedding-pooling-params
-
-    # doc: begin-chat-embedding-extra-params
-    add_special_tokens: bool = Field(
-        default=False,
-        description=(
-            "If true, special tokens (e.g. BOS) will be added to the prompt "
-            "on top of what is added by the chat template. "
-            "For most models, the chat template takes care of adding the "
-            "special tokens so this should be set to false (as is the "
-            "default)."),
-    )
-    chat_template: Optional[str] = Field(
-        default=None,
-        description=(
-            "A Jinja template to use for this conversion. "
-            "As of transformers v4.44, default chat template is no longer "
-            "allowed, so you must provide a chat template if the tokenizer "
-            "does not define one."),
-    )
-    chat_template_kwargs: Optional[dict[str, Any]] = Field(
-        default=None,
-        description=("Additional kwargs to pass to the template renderer. "
-                     "Will be accessible by the chat template."),
-    )
-    mm_processor_kwargs: Optional[dict[str, Any]] = Field(
-        default=None,
-        description=("Additional kwargs to pass to the HF processor."),
-    )
-    priority: int = Field(
-        default=0,
-        description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."),
-    )
-    # doc: end-chat-embedding-extra-params
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_generation_prompt(cls, data):
-        if data.get("continue_final_message") and data.get(
-                "add_generation_prompt"):
-            raise ValueError("Cannot set both `continue_final_message` and "
-                             "`add_generation_prompt` to True.")
-        return data
 
 
-EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
 
-PoolingCompletionRequest = EmbeddingCompletionRequest
-PoolingChatRequest = EmbeddingChatRequest
-PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest]
+
+
 
 
 class ScoreRequest(OpenAIBaseModel):
@@ -933,19 +846,7 @@ class CompletionStreamResponse(OpenAIBaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
 
 
-class EmbeddingResponseData(OpenAIBaseModel):
-    index: int
-    object: str = "embedding"
-    embedding: Union[list[float], str]
 
-
-class EmbeddingResponse(OpenAIBaseModel):
-    id: str = Field(default_factory=lambda: f"embd-{random_uuid()}")
-    object: str = "list"
-    created: int = Field(default_factory=lambda: int(time.time()))
-    model: str
-    data: list[EmbeddingResponseData]
-    usage: UsageInfo
 
 
 class PoolingResponseData(OpenAIBaseModel):
@@ -1124,7 +1025,7 @@ class BatchRequestInput(OpenAIBaseModel):
     url: str
 
     # The parameters of the request.
-    body: Union[ChatCompletionRequest, EmbeddingRequest, ScoreRequest]
+    body: Union[ChatCompletionRequest, ScoreRequest]
 
     @field_validator('body', mode='plain')
     @classmethod
@@ -1133,12 +1034,10 @@ class BatchRequestInput(OpenAIBaseModel):
         url = info.data['url']
         if url == "/v1/chat/completions":
             return ChatCompletionRequest.model_validate(value)
-        if url == "/v1/embeddings":
-            return TypeAdapter(EmbeddingRequest).validate_python(value)
+
         if url == "/v1/score":
             return ScoreRequest.model_validate(value)
-        return TypeAdapter(Union[ChatCompletionRequest, EmbeddingRequest,
-                                 ScoreRequest]).validate_python(value)
+        return TypeAdapter(Union[ChatCompletionRequest, ScoreRequest]).validate_python(value)
 
 
 class BatchResponseData(OpenAIBaseModel):
@@ -1149,8 +1048,7 @@ class BatchResponseData(OpenAIBaseModel):
     request_id: str
 
     # The body of the response.
-    body: Optional[Union[ChatCompletionResponse, EmbeddingResponse,
-                         ScoreResponse]] = None
+    body: Optional[Union[ChatCompletionResponse, ScoreResponse]] = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):

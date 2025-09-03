@@ -8,26 +8,11 @@ from .oai_models import (
 from typing import AsyncGenerator
 import logging
 import time
-from app.engine import maintainance_loop
-from contextlib import asynccontextmanager
-import asyncio
-from fastapi import FastAPI
 from app.agent import handle_prompt, Executor
-from app.engine import get_db_info
 
 logger = logging.getLogger(__name__)
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    app_state = app.state
-    task = asyncio.create_task(maintainance_loop(app_state.db_path))
-
-    try:
-        yield
-    finally:
-        task.cancel()
-
-router = APIRouter(lifespan=lifespan)
+router = APIRouter()
 
 @router.post("/prompt")
 async def prompt(request: ChatCompletionRequest):
