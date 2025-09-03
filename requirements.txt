@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+fastmcp
+httpx
+pydantic
+pydantic-settings
+regex
+schedule
+json-repair
+openai
+python-dotenv
+starlette
+typing-extensions
