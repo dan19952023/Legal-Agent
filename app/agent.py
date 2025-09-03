@@ -191,6 +191,106 @@ class Executor:
         except Exception as e:
             logger.error(f"Error getting document details: {e}")
             return f"Error getting document details: {str(e)}"
+
+    async def search_comments(self, tool_args: dict[str, str]) -> str:
+        """Search for public comments on federal regulatory documents"""
+        try:
+            from mcps.regulations.main import search_comments
+            
+            # Convert tool_args to the format expected by the MCP function
+            search_term = tool_args.get("search_term")
+            agency_id = tool_args.get("agency_id")
+            comment_on_id = tool_args.get("comment_on_id")
+            posted_date = tool_args.get("posted_date")
+            last_modified_date = tool_args.get("last_modified_date")
+            page_size = int(tool_args.get("page_size", 20))
+            page_number = int(tool_args.get("page_number", 1))
+            sort = tool_args.get("sort")
+            
+            result = await search_comments(
+                search_term=search_term,
+                agency_id=agency_id,
+                comment_on_id=comment_on_id,
+                posted_date=posted_date,
+                last_modified_date=last_modified_date,
+                page_size=page_size,
+                page_number=page_number,
+                sort=sort
+            )
+            
+            return result
+                
+        except Exception as e:
+            logger.error(f"Error searching comments: {e}")
+            return f"Error searching comments: {str(e)}"
+
+    async def get_comment_details(self, tool_args: dict[str, str]) -> str:
+        """Get detailed information for a specific public comment"""
+        try:
+            from mcps.regulations.main import get_comment_details
+            
+            comment_id = tool_args.get("comment_id", "")
+            include_attachments = tool_args.get("include_attachments", False)
+            
+            result = await get_comment_details(
+                comment_id=comment_id,
+                include_attachments=include_attachments
+            )
+            
+            return result
+                
+        except Exception as e:
+            logger.error(f"Error getting comment details: {e}")
+            return f"Error getting comment details: {str(e)}"
+
+    async def search_dockets(self, tool_args: dict[str, str]) -> str:
+        """Search for regulatory dockets"""
+        try:
+            from mcps.regulations.main import search_dockets
+            
+            # Convert tool_args to the format expected by the MCP function
+            search_term = tool_args.get("search_term")
+            agency_id = tool_args.get("agency_id")
+            docket_type = tool_args.get("docket_type")
+            last_modified_date = tool_args.get("last_modified_date")
+            page_size = int(tool_args.get("page_size", 20))
+            page_number = int(tool_args.get("page_number", 1))
+            sort = tool_args.get("sort")
+            
+            result = await search_dockets(
+                search_term=search_term,
+                agency_id=agency_id,
+                docket_type=docket_type,
+                last_modified_date=last_modified_date,
+                page_size=page_size,
+                page_number=page_number,
+                sort=sort
+            )
+            
+            return result
+                
+        except Exception as e:
+            logger.error(f"Error searching dockets: {e}")
+            return f"Error searching dockets: {str(e)}"
+
+    async def get_docket_details(self, tool_args: dict[str, str]) -> str:
+        """Get detailed information for a specific regulatory docket"""
+        try:
+            from mcps.regulations.main import get_docket_details
+            
+            docket_id = tool_args.get("docket_id", "")
+            
+            result = await get_docket_details(
+                docket_id=docket_id
+            )
+            
+            return result
+                
+        except Exception as e:
+            logger.error(f"Error getting docket details: {e}")
+            return f"Error getting docket details: {str(e)}"
+
+
         
     async def execute_tool(self, tool_name: str, tool_args: dict[str, str]) -> str:
         if tool_name == "search_documents":
@@ -206,6 +306,30 @@ class Executor:
                 return "No document ID provided"
             logger.info(f'Getting document details: {document_id} ({tool_args.get("reasoning", "")})')
             return await self.get_document_details(tool_args)
+
+        if tool_name == "search_comments":
+            logger.info(f'Searching comments: {tool_args.get("search_term", "all")} ({tool_args.get("reasoning", "")})')
+            return await self.search_comments(tool_args)
+
+        if tool_name == "get_comment_details":
+            comment_id = tool_args.get("comment_id", "")
+            if not comment_id:
+                return "No comment ID provided"
+            logger.info(f'Getting comment details: {comment_id} ({tool_args.get("reasoning", "")})')
+            return await self.get_comment_details(tool_args)
+
+        if tool_name == "search_dockets":
+            logger.info(f'Searching dockets: {tool_args.get("search_term", "all")} ({tool_args.get("reasoning", "")})')
+            return await self.search_dockets(tool_args)
+
+        if tool_name == "get_docket_details":
+            docket_id = tool_args.get("docket_id", "")
+            if not docket_id:
+                return "No docket ID provided"
+            logger.info(f'Getting docket details: {docket_id} ({tool_args.get("reasoning", "")})')
+            return await self.get_docket_details(tool_args)
+
+
 
         if tool_name == "python":
             code = tool_args.get("code", "")
@@ -361,6 +485,83 @@ PLANNER_TOOLS = [
             }
         }
     },
+
+
+    {
+        "type": "function",
+        "function": {
+            "name": "search_comments",
+            "description": "Search for public comments on federal regulatory documents from Regulations.gov",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "search_term": {"type": "string", "description": "Search term to filter comments (e.g. 'water', 'healthcare')"},
+                    "agency_id": {"type": "string", "description": "Agency acronym to filter by (e.g. 'EPA', 'FDA')"},
+                    "comment_on_id": {"type": "string", "description": "Object ID to filter comments for a specific document"},
+                    "posted_date": {"type": "string", "description": "Posted date filter (format: yyyy-MM-dd)"},
+                    "last_modified_date": {"type": "string", "description": "Last modified date filter (format: yyyy-MM-dd HH:mm:ss)"},
+                    "page_size": {"type": "integer", "description": "Number of results per page (5-250, default: 20)"},
+                    "page_number": {"type": "integer", "description": "Page number (1-20, default: 1)"},
+                    "sort": {"type": "string", "description": "Sort field (postedDate, lastModifiedDate, documentId) with optional - prefix for desc"},
+                    "reasoning": {"type": "string", "description": "Why this search is needed"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_comment_details",
+            "description": "Get detailed information for a specific public comment from Regulations.gov",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "comment_id": {"type": "string", "description": "The comment ID (e.g. 'HHS-OCR-2018-0002-5313')"},
+                    "include_attachments": {"type": "boolean", "description": "Whether to include attachments in the response"},
+                    "reasoning": {"type": "string", "description": "Why this comment is needed"}
+                },
+                "required": ["comment_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_dockets",
+            "description": "Search for regulatory dockets (organizational folders containing multiple documents) from Regulations.gov",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "search_term": {"type": "string", "description": "Search term to filter dockets (e.g. 'water', 'healthcare')"},
+                    "agency_id": {"type": "string", "description": "Agency acronym to filter by (e.g. 'EPA', 'FDA')"},
+                    "docket_type": {"type": "string", "description": "Docket type filter (Rulemaking, Nonrulemaking)"},
+                    "last_modified_date": {"type": "string", "description": "Last modified date filter (format: yyyy-MM-dd HH:mm:ss)"},
+                    "page_size": {"type": "integer", "description": "Number of results per page (5-250, default: 20)"},
+                    "page_number": {"type": "integer", "description": "Page number (1-20, default: 1)"},
+                    "sort": {"type": "string", "description": "Sort field (title, docketId, lastModifiedDate) with optional - prefix for desc"},
+                    "reasoning": {"type": "string", "description": "Why this search is needed"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_docket_details",
+            "description": "Get detailed information for a specific regulatory docket from Regulations.gov",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "docket_id": {"type": "string", "description": "The docket ID (e.g. 'EPA-HQ-OAR-2003-0129')"},
+                    "reasoning": {"type": "string", "description": "Why this docket is needed"}
+                },
+                "required": ["docket_id"]
+            }
+        }
+    },
+
     {
         "type": "function",
         "function": {
@@ -511,7 +712,7 @@ async def handle_prompt(messages: list[dict[str, str]]) -> AsyncGenerator[ChatCo
                 })
                 continue
 
-            elif name in ["search_documents", "get_document_details", "python"]:
+            elif name in ["search_documents", "get_document_details", "search_comments", "get_comment_details", "search_dockets", "get_docket_details", "python"]:
                 if not cot_done:
                     messages.append({
                         'role': 'tool',
